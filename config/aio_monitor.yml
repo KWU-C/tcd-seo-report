@@ -1,0 +1,90 @@
+# TCD SEO/AIO 月次レポート 設定ファイル
+# generate_report.py が参照します
+
+site_url: "https://tcd.jp/"
+
+# ──────────────────────────────────────────
+# 重点キーワード
+# Search Console でのクエリ文字列と完全一致で照合します
+# ──────────────────────────────────────────
+key_keywords:
+  - "WordPressテーマ"
+  - "ワードプレステーマ"
+  - "ワードプレス テーマ"
+  - "WordPress テーマ おすすめ"
+  - "コーポレートサイト WordPress テーマ"
+  - "ビジネス WordPress テーマ"
+  - "ランディングページ WordPress テーマ"
+  - "ブログ WordPress テーマ おすすめ"
+  - "TCD テーマ"
+  - "WordPress 有料テーマ"
+
+# ──────────────────────────────────────────
+# AIO 重点ページ
+# AI Overview によるCTR損失を特に監視するページ
+# url: サイト内パス（先頭スラッシュ）または完全URL
+# ──────────────────────────────────────────
+aio_focus_pages:
+  - url: "/"
+    name: "トップページ"
+  - url: "/wordpress-theme/"
+    name: "WordPressテーマ一覧"
+  - url: "/wordpress-theme/corporate/"
+    name: "コーポレートテーマ一覧"
+  - url: "/wordpress-theme/lp/"
+    name: "LPテーマ一覧"
+  - url: "/wordpress-theme/blog/"
+    name: "ブログテーマ一覧"
+  - url: "/about/"
+    name: "TCDについて"
+
+# ──────────────────────────────────────────
+# Definition 記事（〜とは系コンテンツ）
+# AIO に回答として使われやすいため優先監視
+# ──────────────────────────────────────────
+definition_articles:
+  - url: "/blog/wordpress-theme-meaning/"
+    name: "WordPressテーマとは？基礎解説"
+  - url: "/blog/wordpress-theme-install/"
+    name: "WordPressテーマのインストール方法"
+  - url: "/blog/wordpress-child-theme/"
+    name: "子テーマとは？作り方と使い方"
+  - url: "/blog/wordpress-lp/"
+    name: "WordPressでLPを作る方法"
+  - url: "/blog/wordpress-seo/"
+    name: "WordPress SEO対策まとめ"
+  - url: "/blog/corporate-site-wordpress/"
+    name: "コーポレートサイトをWordPressで作る方法"
+
+# ──────────────────────────────────────────
+# LP / CV ページ
+# コンバージョン直結ページ。クリック・IMP変動を要監視
+# type: "lp" | "cv"
+# ──────────────────────────────────────────
+lp_cv_pages:
+  - url: "/lp/wordpress-theme-tcd/"
+    name: "TCDテーマ LP（メイン）"
+    type: "lp"
+  - url: "/lp/corporate-theme/"
+    name: "コーポレートテーマ LP"
+    type: "lp"
+  - url: "/cart/"
+    name: "カートページ"
+    type: "cv"
+  - url: "/checkout/"
+    name: "購入ページ"
+    type: "cv"
+  - url: "/my-account/"
+    name: "マイアカウント"
+    type: "cv"
+
+# ──────────────────────────────────────────
+# レポート設定
+# ──────────────────────────────────────────
+report:
+  # 上位クエリ・ページの表示件数
+  top_n: 20
+  # AIO異常検出の最小インプレッション閾値
+  aio_min_impressions: 100
+  # AIOスコアの警告閾値（0〜1）
+  aio_alert_threshold: 0.4
