@@ -1,9 +1,9 @@
-# 認証情報（絶対にコミットしない）
+# 認証情報・APIキー（絶対にコミットしない）
 credentials.json
 token.pickle
-*.json
-sa-key.json
-service-account*.json
+.env
+API key.txt
+*.key.txt
 
 # 生成レポート（任意でコミット対象にしたい場合はコメントアウト）
 reports/
