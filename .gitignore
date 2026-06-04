@@ -3,6 +3,7 @@ credentials.json
 token.pickle
 .env
 API key.txt
+SerpApi.txt
 *.key.txt
 
 # 生成レポート（任意でコミット対象にしたい場合はコメントアウト）

@@ -341,128 +341,135 @@ def load_watching_csv(csv_path: str = "Watching.csv") -> dict[str, list[dict]]:
     return sections
 
 
+def _extract_domain(url: str) -> str:
+    m = re.search(r'https?://([^/]+)', url)
+    return m.group(1) if m else url
+
+
 def fetch_google_aio(
     queries: list[str],
-    headless: bool = True,
-    wait_ms: int = 2500,
-    output_dir: str = "reports/aio_visibility",
+    aio_cfg: dict | None = None,
+    output_dir: str = "reports/google_aio",
+    force: bool = False,
 ) -> list[dict]:
-    """Playwright でGoogle検索し、AI Overview の有無・TCD言及・引用URLを観測する。
-    当日キャッシュが存在する場合はそれを返す。"""
+    """SerpAPI で Google 検索し、AI Overview の有無・TCD引用・引用URLを観測する。
+    同日キャッシュが存在する場合はそれを返す（force=True で強制再取得）。"""
     import json
     from datetime import date
 
-    today_str = date.today().strftime("%Y-%m-%d")
-    out_dir   = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = out_dir / f"{today_str}_aio.json"
-    ss_dir     = out_dir / today_str
-    ss_dir.mkdir(exist_ok=True)
+    api_key = os.environ.get("SERPAPI_API_KEY")
+    if not api_key:
+        print("  SERPAPI_API_KEY が未設定のため AIO 観測をスキップします。", file=sys.stderr)
+        return [{"query": q, "observed_at": date.today().strftime("%Y-%m-%d"),
+                 "status": "API_KEY_MISSING", "aio_exists": None,
+                 "tcd_mentioned": False, "tcd_cited": False,
+                 "cited_urls": [], "cited_domains": [], "competitor_domains": [],
+                 "error": "SERPAPI_API_KEY 未設定"} for q in queries]
 
-    if cache_path.exists():
+    cfg = aio_cfg or {}
+    today_str  = date.today().strftime("%Y-%m-%d")
+    out_dir    = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = out_dir / f"{today_str}.json"
+
+    if cache_path.exists() and not force:
         print(f"  AIOキャッシュ使用: {cache_path}")
         return json.loads(cache_path.read_text(encoding="utf-8"))
 
     try:
-        from playwright.sync_api import sync_playwright
+        from serpapi import GoogleSearch
     except ImportError:
-        print("  playwright 未インストール。pip install playwright && playwright install chromium", file=sys.stderr)
+        print("  google-search-results 未インストール。pip install google-search-results", file=sys.stderr)
         return []
 
-    _TCD_KEYS = ["tcd.jp", "株式会社tcd", "tcd co", "（tcd）", "TCD"]
+    _TCD_PATTERNS = ["tcd.jp", "株式会社tcd", " tcd ", "（tcd）"]
     results: list[dict] = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        ctx = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="ja-JP",
-            viewport={"width": 1280, "height": 900},
-        )
-        page = ctx.new_page()
+    for query in queries:
+        print(f"  SerpAPI AIO確認中: 「{query}」...")
 
-        for query in queries:
-            print(f"  AIO確認中: 「{query}」...")
-            encoded = query.replace(" ", "+")
-            url = f"https://www.google.co.jp/search?q={encoded}&hl=ja&gl=jp"
-            aio_exists   = False
-            aio_excerpt  = None
-            tcd_mentioned = False
-            cited_urls   : list[str] = []
-            cited_companies: list[str] = []
-            error        = None
+        aio_exists        = False
+        aio_text          = None
+        cited_urls:   list[str] = []
+        cited_domains:list[str] = []
+        cited_titles: list[str] = []
+        tcd_mentioned     = False
+        tcd_cited         = False
+        tcd_cited_urls:list[str] = []
+        competitor_domains:list[str] = []
+        status            = "OK_NO_AIO"
+        error             = None
 
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(wait_ms)
+        try:
+            params = {
+                "engine":        cfg.get("engine", "google"),
+                "q":             query,
+                "google_domain": cfg.get("google_domain", "google.co.jp"),
+                "hl":            cfg.get("hl", "ja"),
+                "gl":            cfg.get("gl", "jp"),
+                "location":      cfg.get("location", "Japan"),
+                "api_key":       api_key,
+            }
+            res = GoogleSearch(params).get_dict()
 
-                html = page.content()
+            ai_ov = res.get("ai_overview")
 
-                # AIO有無判定（日本語見出しテキストで検出）
-                aio_exists = "AI による概要" in html or "AIによる概要" in html
+            # フォールバック: page_token がある場合は google_ai_overview エンジンで再取得
+            if not ai_ov and res.get("ai_overview_page_token"):
+                aio_res = GoogleSearch({
+                    "engine":   "google_ai_overview",
+                    "page_token": res["ai_overview_page_token"],
+                    "api_key":  api_key,
+                }).get_dict()
+                ai_ov = aio_res.get("ai_overview")
 
-                if aio_exists:
-                    # AIOブロックのテキストを抽出
-                    for sel in [
-                        "div[data-attrid='SGE']",
-                        "[jsname='Cpkphb']",
-                        "div.LLtSOc",
-                        "div.wDYxhc",
-                    ]:
-                        el = page.query_selector(sel)
-                        if el:
-                            aio_excerpt = el.inner_text()[:400].strip()
-                            break
-                    # テキスト検索フォールバック
-                    if not aio_excerpt:
-                        try:
-                            el = page.locator("text=AI による概要").first
-                            parent = el.locator("xpath=../..").first
-                            aio_excerpt = parent.inner_text()[:400].strip()
-                        except Exception:
-                            pass
+            if ai_ov:
+                aio_exists = True
+                status     = "OK_WITH_AIO"
+                aio_text   = ai_ov.get("text", "")
 
-                    # TCD言及
-                    check_text = (aio_excerpt or "") + html[:8000]
-                    tcd_mentioned = any(k.lower() in check_text.lower() for k in _TCD_KEYS)
+                for ref in ai_ov.get("references", []):
+                    if isinstance(ref, str):
+                        url, domain, title = ref, _extract_domain(ref), ""
+                    else:
+                        url    = ref.get("url", "")
+                        src    = ref.get("source", {})
+                        domain = (src.get("name", "") if isinstance(src, dict) else str(src)) or _extract_domain(url)
+                        title  = ref.get("title", "")
+                    if url:    cited_urls.append(url)
+                    if domain: cited_domains.append(domain)
+                    if title:  cited_titles.append(title)
 
-                    # 引用URL（AIOブロック内のリンク）
-                    try:
-                        links = page.locator("a[href*='http']").all()
-                        for lnk in links[:30]:
-                            href = lnk.get_attribute("href") or ""
-                            if href.startswith("http") and "google" not in href:
-                                cited_urls.append(href)
-                        cited_urls = list(dict.fromkeys(cited_urls))[:5]
-                    except Exception:
-                        pass
+                    chk = (url + " " + domain + " " + title).lower()
+                    if any(p.lower() in chk for p in _TCD_PATTERNS):
+                        tcd_cited = True
+                        tcd_cited_urls.append(url)
 
-                # スクリーンショット
-                ss_name = query.replace(" ", "_") + ".png"
-                ss_path = str(ss_dir / ss_name)
-                page.screenshot(path=ss_path, clip={"x": 0, "y": 0, "width": 900, "height": 700})
+                check_text = (aio_text or "").lower()
+                tcd_mentioned = any(p.lower() in check_text for p in _TCD_PATTERNS) or tcd_cited
+                competitor_domains = [d for d in cited_domains
+                                      if not any(p.lower() in d.lower() for p in _TCD_PATTERNS)][:5]
 
-            except Exception as e:
-                error = str(e)
-                ss_path = None
+        except Exception as e:
+            error  = str(e)
+            status = "FETCH_ERROR"
+            print(f"  SerpAPI エラー ({query}): {e}", file=sys.stderr)
 
-            results.append({
-                "query":            query,
-                "observed_at":      today_str,
-                "aio_exists":       aio_exists,
-                "tcd_mentioned":    tcd_mentioned,
-                "aio_excerpt":      aio_excerpt,
-                "cited_companies":  cited_companies,
-                "cited_urls":       cited_urls,
-                "screenshot_path":  ss_path if not error else None,
-                "error":            error,
-            })
-
-        browser.close()
+        results.append({
+            "query":              query,
+            "observed_at":        today_str,
+            "status":             status,
+            "aio_exists":         aio_exists,
+            "aio_text":           aio_text,
+            "cited_urls":         cited_urls,
+            "cited_domains":      cited_domains,
+            "cited_titles":       cited_titles,
+            "tcd_mentioned":      tcd_mentioned,
+            "tcd_cited":          tcd_cited,
+            "tcd_cited_urls":     tcd_cited_urls,
+            "competitor_domains": competitor_domains,
+            "error":              error,
+        })
 
     cache_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  AIO観測結果保存: {cache_path}")
@@ -826,24 +833,40 @@ def gen_markdown(data: dict, config: dict) -> str:
     # ── 3. Google AI Overview 観測 ──
     md += ["## 3. Google AI Overview 観測", ""]
     gaio = data.get("google_aio", [])
-    if not gaio:
-        md.append("観測データなし（playwright 未インストールまたは無効）。\n")
+    if not gaio or all(r.get("status") == "API_KEY_MISSING" for r in gaio):
+        md.append("観測データなし（SERPAPI_API_KEY 未設定または無効）。\n")
     else:
         md += [
-            "| クエリ | AIO有無 | TCD言及 | 引用URL | エラー |",
-            "|--------|--------|--------|--------|--------|",
+            "| クエリ | ステータス | AIO有無 | TCD引用 | TCD言及 | 競合引用ドメイン |",
+            "|--------|-----------|--------|--------|--------|----------------|",
         ]
         for r in gaio:
-            aio  = "✅" if r.get("aio_exists") else ("⬜" if r.get("aio_exists") is False else "?")
-            tcd  = "✅" if r.get("tcd_mentioned") else "なし"
-            urls = " ".join(r.get("cited_urls", [])[:2]) or "-"
-            err  = r.get("error", "") or ""
-            md.append(f"| {r['query']} | {aio} | {tcd} | {urls} | {err[:40]} |")
+            aio  = "✅ あり" if r.get("aio_exists") else ("⬜ なし" if r.get("aio_exists") is False else "?")
+            tcd_c = "✅" if r.get("tcd_cited") else "なし"
+            tcd_m = "✅" if r.get("tcd_mentioned") else "なし"
+            comp  = "・".join(r.get("competitor_domains", [])[:3]) or "-"
+            md.append(f"| {r['query']} | {r.get('status','')} | {aio} | {tcd_c} | {tcd_m} | {comp} |")
         md.append("")
         for r in gaio:
-            if r.get("aio_excerpt"):
-                md.append(f"**{r['query']}** — 抜粋: {r['aio_excerpt'][:200]}")
+            if r.get("aio_exists"):
+                md.append(f"### {r['query']}")
                 md.append("")
+                if r.get("aio_text"):
+                    md.append(f"**AIO本文抜粋**: {r['aio_text'][:300]}")
+                    md.append("")
+                if r.get("cited_urls"):
+                    md.append("**引用URL一覧:**")
+                    for u in r["cited_urls"]:
+                        md.append(f"- {u}")
+                    md.append("")
+                if r.get("tcd_cited_urls"):
+                    md.append("**TCD引用URL:**")
+                    for u in r["tcd_cited_urls"]:
+                        md.append(f"- {u}")
+                    md.append("")
+                if r.get("competitor_domains"):
+                    md.append(f"**競合引用ドメイン**: {', '.join(r['competitor_domains'])}")
+                    md.append("")
 
     # ── 3. サービス系 → 4 ──
     md += ["## 3. サービス系", ""]
@@ -1346,62 +1369,82 @@ def gen_html(data: dict, config: dict) -> str:
     hypothesis_html  = "".join(hypothesis_row(h) for h in gen_hypothesis())
     checkpoints_html = "".join(check_row(c)      for c in gen_html_checkpoints())
 
-    # ── Google AI Overview セクション ──
+    # ── Google AI Overview セクション（SerpAPI）──
     def _google_aio_section() -> str:
         gaio = data.get("google_aio", [])
         title_html = sec_title("3", "Google AI Overview 観測")
         note_row = (
             f'<tr><td style="padding-bottom:8px;">'
             f'<p style="color:{MUTED};font-size:11px;margin:0;">'
-            f'Google 検索結果上の AI Overview（AIによる概要）の有無とTCD言及を観測しています。'
+            f'SerpAPI 経由で Google 検索上の AI Overview（AIによる概要）を観測しています。'
+            f'取得失敗はAIOなしとは区別します。'
             f'</p></td></tr>'
         )
-        if not gaio:
+        no_real_data = all(r.get("status") == "API_KEY_MISSING" for r in gaio) if gaio else True
+        if not gaio or no_real_data:
             return (
                 title_html + note_row +
                 f'<tr><td style="padding-bottom:16px;">'
                 f'<p style="color:{MUTED};font-size:12px;margin:0;">'
-                f'観測データなし（playwright 未インストールまたは無効）。</p></td></tr>'
+                f'観測データなし（SERPAPI_API_KEY 未設定または無効）。</p></td></tr>'
             )
+
         hdr = (
-            th("クエリ", "left", "160") +
+            th("クエリ", "left", "150") +
             th("AIO有無", "center", "70") +
-            th("TCD言及", "center", "70") +
-            th("引用URL（上位）")
+            th("TCD引用", "center", "70") +
+            th("引用URL（上位）") +
+            th("競合引用", "left", "120")
         )
         rows_html = ""
+        _STATUS_LABEL = {
+            "OK_WITH_AIO": ("AIOあり",   UP),
+            "OK_NO_AIO":   ("AIOなし",   MUTED),
+            "FETCH_ERROR": ("取得失敗",  DOWN),
+            "API_KEY_MISSING": ("APIキー未設定", DOWN),
+        }
         for r in gaio:
-            aio_color = UP if r.get("aio_exists") else MUTED
-            aio_txt   = "&#9989; あり" if r.get("aio_exists") else "⬜ なし"
-            if r.get("aio_exists") is None:
-                aio_txt = f'<span style="color:{MUTED};">?</span>'
-            tcd_color = UP if r.get("tcd_mentioned") else MUTED
-            tcd_txt   = "&#9989; 言及あり" if r.get("tcd_mentioned") else "なし"
+            status = r.get("status", "OK_NO_AIO")
+            s_label, s_color = _STATUS_LABEL.get(status, (status, MUTED))
+
+            tcd_cited = r.get("tcd_cited", False)
+            tcd_color = UP if tcd_cited else MUTED
+            tcd_txt   = "&#9989; 引用あり" if tcd_cited else ("言及のみ" if r.get("tcd_mentioned") else "なし")
+
             urls = r.get("cited_urls", [])
-            url_html  = "<br>".join(
-                f'<a href="{esc(u)}" style="color:{CYAN};font-size:11px;text-decoration:none;">{esc(u[:55])}…</a>'
-                for u in urls[:2]
+            url_html = "<br>".join(
+                f'<a href="{esc(u)}" style="color:{CYAN};font-size:11px;text-decoration:none;">{esc(_extract_domain(u))}</a>'
+                for u in urls[:3]
             ) or f'<span style="color:{MUTED};font-size:11px;">-</span>'
-            if r.get("error"):
-                rows_html += (
-                    f'<tr><td colspan="4" style="padding:7px 10px;font-size:12px;color:{DOWN};">'
-                    f'⚠ {esc(r["query"])}: {esc(r["error"][:80])}</td></tr>\n'
+
+            comp = "・".join(esc(d) for d in r.get("competitor_domains", [])[:3]) or "-"
+
+            rows_html += (
+                "<tr>"
+                + td_cell(esc(r["query"]))
+                + td_cell(f'<span style="color:{s_color};font-weight:700;">{s_label}</span>', "center")
+                + td_cell(f'<span style="color:{tcd_color};font-weight:700;">{tcd_txt}</span>', "center")
+                + td_cell(url_html)
+                + td_cell(f'<span style="font-size:12px;">{comp}</span>')
+                + "</tr>\n"
+            )
+            if tcd_cited and r.get("tcd_cited_urls"):
+                tcd_url_html = "・".join(
+                    f'<a href="{esc(u)}" style="color:{UP};font-size:11px;">{esc(_extract_domain(u))}</a>'
+                    for u in r["tcd_cited_urls"][:2]
                 )
-            else:
                 rows_html += (
-                    "<tr>"
-                    + td_cell(esc(r["query"]))
-                    + td_cell(f'<span style="color:{aio_color};font-weight:700;">{aio_txt}</span>', "center")
-                    + td_cell(f'<span style="color:{tcd_color};font-weight:700;">{tcd_txt}</span>', "center")
-                    + td_cell(url_html)
-                    + "</tr>\n"
+                    f'<tr style="background:#f0fdf4;"><td colspan="5" '
+                    f'style="padding:5px 10px 7px;font-size:11px;color:{UP};">'
+                    f'&#9989; TCD引用URL: {tcd_url_html}</td></tr>\n'
                 )
-                if r.get("tcd_mentioned") and r.get("aio_excerpt"):
-                    rows_html += (
-                        f'<tr style="background:#f8fafc;"><td colspan="4" '
-                        f'style="padding:5px 10px 7px;font-size:11px;color:{MUTED};">'
-                        f'&#128203; 抜粋: {esc(r["aio_excerpt"][:120])}…</td></tr>\n'
-                    )
+            elif r.get("aio_text") and r.get("aio_exists"):
+                rows_html += (
+                    f'<tr style="background:#f8fafc;"><td colspan="5" '
+                    f'style="padding:5px 10px 7px;font-size:11px;color:{MUTED};">'
+                    f'&#128203; AIO抜粋: {esc((r["aio_text"] or "")[:120])}…</td></tr>\n'
+                )
+
         table_html = wrap_table(hdr, rows_html)
         return title_html + note_row + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
 
@@ -1543,6 +1586,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="reports", help="レポート出力先ディレクトリ")
     parser.add_argument("--no-html", action="store_true", help="HTML 出力をスキップ")
     parser.add_argument("--send-email", action="store_true", help="Gmail API でレポートをメール送信する")
+    parser.add_argument("--force-aio", action="store_true", help="AIO観測キャッシュを無視して再取得する")
     parser.add_argument("--to", default="kawauchi@tcd.jp", help="送信先メールアドレス（デフォルト: kawauchi@tcd.jp）")
     parser.add_argument(
         "--period",
@@ -1601,12 +1645,12 @@ def main() -> None:
     # Google AI Overview 観測
     aio_cfg = config.get("google_aio", {})
     if aio_cfg.get("enabled", False):
-        print("Google AI Overview を観測中...")
+        print("Google AI Overview を観測中（SerpAPI）...")
         google_aio_data = fetch_google_aio(
-            queries   = aio_cfg.get("queries", []),
-            headless  = aio_cfg.get("headless", True),
-            wait_ms   = aio_cfg.get("wait_ms", 2500),
-            output_dir= str(Path(args.output_dir) / "aio_visibility"),
+            queries    = aio_cfg.get("queries", []),
+            aio_cfg    = aio_cfg,
+            output_dir = str(Path(args.output_dir) / "google_aio"),
+            force      = args.force_aio,
         )
     else:
         google_aio_data = []

@@ -51,8 +51,11 @@ google_aio:
     - "インナーブランディング 会社"
     - "インナーブランディング 会社 東京"
     - "インナーブランディング 会社 大阪"
-  headless: true
-  wait_ms: 2500
+  engine: "google"
+  google_domain: "google.co.jp"
+  hl: "ja"
+  gl: "jp"
+  location: "Japan"
 
 # ──────────────────────────────────────────
 # レポート設定
