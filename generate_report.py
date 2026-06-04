@@ -241,6 +241,23 @@ def fetch_devices(svc, site, s, e) -> pd.DataFrame:
     return _to_df(_fetch_rows(svc, site, s, e, ["device"]), ["device"])
 
 
+def fetch_page_top_queries(svc, site: str, s: str, e: str, page_url: str, n: int = 5) -> list[str]:
+    """指定ページの上位クエリを impressions 順で返す。"""
+    variants = {page_url, page_url.rstrip("/"), page_url.rstrip("/") + "/"}
+    for url in variants:
+        rows = _fetch_rows(
+            svc, site, s, e,
+            dimensions=["query"],
+            dimension_filter={"dimension": "page", "operator": "equals", "expression": url},
+            row_limit=n * 3,
+        )
+        if rows:
+            df = _to_df(rows, ["query"])
+            if not df.empty:
+                return df.nlargest(n, "impressions")["query"].tolist()
+    return []
+
+
 # ────────────────────────────────────────────────────────────────────
 # データ処理・集計
 # ────────────────────────────────────────────────────────────────────
@@ -414,27 +431,60 @@ def fetch_google_aio(
 
             ai_ov = res.get("ai_overview")
 
-            # フォールバック: page_token がある場合は google_ai_overview エンジンで再取得
+            # フォールバック1: root に page_token がある場合
             if not ai_ov and res.get("ai_overview_page_token"):
                 aio_res = GoogleSearch({
-                    "engine":   "google_ai_overview",
+                    "engine":     "google_ai_overview",
                     "page_token": res["ai_overview_page_token"],
-                    "api_key":  api_key,
+                    "api_key":    api_key,
                 }).get_dict()
                 ai_ov = aio_res.get("ai_overview")
 
-            if ai_ov:
+            # フォールバック2: ai_ov が存在するが中身が page_token のみ（コンテンツ未展開）
+            if ai_ov and not ai_ov.get("text_blocks") and not ai_ov.get("references") and ai_ov.get("page_token"):
+                aio_res = GoogleSearch({
+                    "engine":     "google_ai_overview",
+                    "page_token": ai_ov["page_token"],
+                    "api_key":    api_key,
+                }).get_dict()
+                ai_ov = aio_res.get("ai_overview") or ai_ov
+
+            # AIO が存在するが詳細コンテンツを取得できなかった場合を判定
+            _detail_fetch_failed = (
+                ai_ov is not None
+                and not ai_ov.get("text_blocks")
+                and not ai_ov.get("references")
+                and not ai_ov.get("text")
+                and "page_token" in ai_ov
+            )
+            if _detail_fetch_failed:
+                aio_exists = True
+                status     = "AIO_DETAIL_FETCH_FAILED"
+
+            if ai_ov and not _detail_fetch_failed:
                 aio_exists = True
                 status     = "OK_WITH_AIO"
-                aio_text   = ai_ov.get("text", "")
+                # text_blocks 形式（新）と text 形式（旧）の両対応
+                if ai_ov.get("text_blocks"):
+                    aio_text = " ".join(
+                        b.get("snippet", "") for b in ai_ov["text_blocks"]
+                        if isinstance(b, dict) and b.get("type") == "paragraph"
+                    )
+                else:
+                    aio_text = ai_ov.get("text", "")
 
                 for ref in ai_ov.get("references", []):
                     if isinstance(ref, str):
                         url, domain, title = ref, _extract_domain(ref), ""
                     else:
-                        url    = ref.get("url", "")
+                        # SerpAPI: URL フィールドは "link"（旧 "url" にも対応）
+                        url    = ref.get("link", "") or ref.get("url", "")
                         src    = ref.get("source", {})
-                        domain = (src.get("name", "") if isinstance(src, dict) else str(src)) or _extract_domain(url)
+                        # source は文字列またはdictどちらの場合もある
+                        if isinstance(src, dict):
+                            domain = src.get("name", "") or _extract_domain(url)
+                        else:
+                            domain = str(src) if src else _extract_domain(url)
                         title  = ref.get("title", "")
                     if url:    cited_urls.append(url)
                     if domain: cited_domains.append(domain)
@@ -474,6 +524,307 @@ def fetch_google_aio(
     cache_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  AIO観測結果保存: {cache_path}")
     return results
+
+
+def load_previous_aio_cache(output_dir: str, today_str: str) -> list[dict]:
+    """当日以外で最新のAIOキャッシュを返す。"""
+    import json
+    out_dir = Path(output_dir)
+    if not out_dir.exists():
+        return []
+    for f in sorted(out_dir.glob("*.json"), reverse=True):
+        if f.stem != today_str:
+            try:
+                return json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+    return []
+
+
+def compute_aio_diff(current: list[dict], previous: list[dict]) -> dict[str, dict]:
+    """クエリ別のAIO変化ステータスを返す。
+    status: newly_appeared | disappeared | tcd_newly_cited | tcd_lost_citation |
+            citation_domains_increased | citation_domains_decreased | no_change | no_previous_data
+    """
+    prv_map = {r["query"]: r for r in previous}
+    result: dict[str, dict] = {}
+    for r in current:
+        q = r["query"]
+        p = prv_map.get(q)
+        if p is None:
+            result[q] = {"status": "no_previous_data"}
+            continue
+        cur_aio   = bool(r.get("aio_exists"))
+        prv_aio   = bool(p.get("aio_exists"))
+        cur_cited = r.get("tcd_cited", False)
+        prv_cited = p.get("tcd_cited", False)
+        cur_doms  = len(set(r.get("cited_domains", [])))
+        prv_doms  = len(set(p.get("cited_domains", [])))
+        if cur_aio and not prv_aio:
+            result[q] = {"status": "newly_appeared"}
+        elif not cur_aio and prv_aio:
+            result[q] = {"status": "disappeared"}
+        elif cur_aio and prv_aio:
+            if cur_cited and not prv_cited:
+                result[q] = {"status": "tcd_newly_cited"}
+            elif not cur_cited and prv_cited:
+                result[q] = {"status": "tcd_lost_citation"}
+            elif cur_doms > prv_doms:
+                result[q] = {"status": "citation_domains_increased", "delta": cur_doms - prv_doms}
+            elif cur_doms < prv_doms:
+                result[q] = {"status": "citation_domains_decreased", "delta": prv_doms - cur_doms}
+            else:
+                result[q] = {"status": "no_change"}
+        else:
+            result[q] = {"status": "no_change"}
+    return result
+
+
+def fetch_cited_page_features(url: str, timeout: int = 10) -> dict:
+    """引用URLのページ構造を解析して「なぜ引用されたか」の手がかりを返す。"""
+    import requests
+    from bs4 import BeautifulSoup
+
+    base: dict = {
+        "url": url, "ok": False, "error": None,
+        "title": "", "h1": "", "h2s": [], "meta_desc": "",
+        "schema_types": [], "content_type": "",
+        "has_faq": False, "has_numbered_list": False,
+        "word_count": 0,
+    }
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; TCD-SEO-Bot/1.0)"}
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        title_tag = soup.find("title")
+        base["title"] = title_tag.get_text(strip=True) if title_tag else ""
+
+        h1_tag = soup.find("h1")
+        base["h1"] = h1_tag.get_text(strip=True)[:100] if h1_tag else ""
+
+        base["h2s"] = [h.get_text(strip=True)[:80] for h in soup.find_all("h2")][:6]
+
+        meta = soup.find("meta", attrs={"name": "description"})
+        base["meta_desc"] = meta.get("content", "")[:200] if meta else ""
+
+        # JSON-LD スキーマ抽出
+        schema_types: list[str] = []
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                import json as _json
+                d = _json.loads(script.string or "")
+                def _collect_types(obj):
+                    if isinstance(obj, dict):
+                        if "@type" in obj:
+                            t = obj["@type"]
+                            schema_types.extend(t if isinstance(t, list) else [t])
+                        for v in obj.values():
+                            _collect_types(v)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            _collect_types(item)
+                _collect_types(d)
+            except Exception:
+                pass
+        base["schema_types"] = list(dict.fromkeys(schema_types))
+        base["has_faq"] = any("FAQ" in t or "faq" in t.lower() for t in base["schema_types"])
+
+        base["has_numbered_list"] = bool(soup.find("ol"))
+
+        body_text = soup.get_text(separator=" ", strip=True)
+        base["word_count"] = len(body_text)
+
+        # コンテンツタイプ判定
+        title_h1 = (base["title"] + " " + base["h1"]).lower()
+        h2_text  = " ".join(base["h2s"]).lower()
+        if base["has_faq"] or any("?" in h or "か？" in h or "ですか" in h for h in base["h2s"]):
+            base["content_type"] = "FAQ型"
+        elif any(w in title_h1 for w in ["とは", "わかりやすく", "意味", "定義"]):
+            base["content_type"] = "定義型"
+        elif any(w in title_h1 for w in ["おすすめ", "選", "比較", "一覧", "ランキング"]):
+            base["content_type"] = "リスト比較型"
+        elif any(w in title_h1 for w in ["方法", "やり方", "手順", "ステップ", "進め方"]):
+            base["content_type"] = "ハウツー型"
+        else:
+            base["content_type"] = "その他"
+
+        base["ok"] = True
+    except Exception as e:
+        base["error"] = str(e)[:120]
+    return base
+
+
+def analyze_aio_citations(
+    aio_results: list[dict],
+    output_dir: str = "reports/citation_analysis",
+    force: bool = False,
+) -> dict[str, list[dict]]:
+    """引用URLのページ構造を解析してクエリ別に返す。同日キャッシュを再利用。"""
+    import json
+    from datetime import date
+
+    today_str  = date.today().strftime("%Y-%m-%d")
+    out_dir    = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = out_dir / f"{today_str}.json"
+
+    if cache_path.exists() and not force:
+        print(f"  引用分析キャッシュ使用: {cache_path}")
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+
+    _TCD = ["tcd.jp", "株式会社tcd"]
+    result: dict[str, list[dict]] = {}
+
+    for r in aio_results:
+        if not r.get("cited_urls"):
+            continue
+        query = r["query"]
+        comp_urls = [u for u in r["cited_urls"] if not any(p in u.lower() for p in _TCD)][:3]
+        if not comp_urls:
+            continue
+        print(f"  競合コンテンツ分析中: 「{query}」({len(comp_urls)}件)...")
+        result[query] = []
+        for url in comp_urls:
+            feats = fetch_cited_page_features(url)
+            result[query].append(feats)
+
+    cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  引用分析結果保存: {cache_path}")
+    return result
+
+
+# 共通トピック判定キーワード（競合分析・TCD差分で共用）
+_TOPIC_KEYWORDS: list[tuple[str, str]] = [
+    ("比較",      "比較一覧"),
+    ("選び方",    "選び方・選定基準"),
+    ("費用",      "費用・料金相場"),
+    ("事例",      "導入事例・実績"),
+    ("メリット",  "メリット・効果"),
+    ("方法",      "進め方・手順"),
+    ("とは",      "定義・概要"),
+    ("FAQ",       "FAQ・よくある質問"),
+    ("ランキング","ランキング・おすすめ"),
+    ("会社",      "会社・企業一覧"),
+]
+
+
+def analyze_common_elements(pages: list[dict]) -> dict:
+    """競合ページの共通要素を機械的に抽出する。"""
+    from collections import Counter
+    ok = [p for p in pages if p.get("ok")]
+    if not ok:
+        return {}
+    n = len(ok)
+
+    type_counts = Counter(p.get("content_type", "その他") for p in ok)
+    dominant    = type_counts.most_common(1)[0][0]
+
+    faq_count  = sum(1 for p in ok if p.get("has_faq"))
+    list_count = sum(1 for p in ok if p.get("has_numbered_list"))
+
+    schema_counter = Counter(s for p in ok for s in p.get("schema_types", []))
+    common_schemas = [s for s, c in schema_counter.items() if c >= max(2, n - 1)]
+
+    common_topics: list[dict] = []
+    for kw, label in _TOPIC_KEYWORDS:
+        hits = sum(
+            1 for p in ok
+            if any(kw in h for h in p.get("h2s", []))
+            or kw in (p.get("title", "") + " " + p.get("h1", ""))
+        )
+        if hits >= 2:
+            common_topics.append({"keyword": kw, "label": label, "count": hits, "total": n})
+
+    wcs    = [p["word_count"] for p in ok if p.get("word_count", 0) > 0]
+    avg_wc = int(sum(wcs) / len(wcs)) if wcs else 0
+
+    return {
+        "dominant_content_type": dominant,
+        "content_type_counts":   dict(type_counts),
+        "faq_count":     faq_count,
+        "faq_ratio":     f"{faq_count}/{n}",
+        "list_count":    list_count,
+        "list_ratio":    f"{list_count}/{n}",
+        "common_schemas": common_schemas[:6],
+        "common_topics":  common_topics,
+        "avg_word_count": avg_wc,
+        "page_count":     n,
+    }
+
+
+def compute_tcd_gap(common: dict, tcd: dict) -> dict:
+    """共通要素とTCDページを照合して実装済み・未実装を返す。"""
+    tcd_text = " ".join([
+        tcd.get("title", ""),
+        tcd.get("h1", ""),
+        " ".join(tcd.get("h2s", [])),
+        tcd.get("meta_desc", ""),
+    ]).lower()
+
+    implemented:     list[str] = []
+    not_implemented: list[str] = []
+
+    for topic in common.get("common_topics", []):
+        kw = topic["keyword"]
+        if kw.lower() in tcd_text:
+            implemented.append(topic["label"])
+        else:
+            not_implemented.append(topic["label"])
+
+    if common.get("faq_count", 0) >= 2:
+        label = "FAQ・よくある質問"
+        if label not in implemented and label not in not_implemented:
+            (implemented if tcd.get("has_faq") else not_implemented).append(label)
+
+    return {
+        "implemented":      implemented,
+        "not_implemented":  not_implemented,
+        "tcd_word_count":   tcd.get("word_count", 0),
+        "tcd_content_type": tcd.get("content_type", "不明"),
+        "tcd_title":        tcd.get("title", "")[:80],
+    }
+
+
+def build_citation_insights(
+    citation_analysis: dict[str, list[dict]],
+    tcd_url: str = "https://tcd.jp/",
+    output_dir: str = "reports/citation_insights",
+    force: bool = False,
+) -> dict[str, dict]:
+    """共通要素・TCD差分を機械的に集計して返す。insight フィールドは Claude Code が別途書き込む。"""
+    import json as _json
+    from datetime import date
+    out_dir    = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    today_str  = date.today().strftime("%Y-%m-%d")
+    cache_path = out_dir / f"{today_str}.json"
+
+    if cache_path.exists() and not force:
+        print(f"  インサイトキャッシュ使用: {cache_path}")
+        return _json.loads(cache_path.read_text(encoding="utf-8"))
+
+    # TCDトップページ解析（別キャッシュ）
+    tcd_cache = out_dir / "tcd_page.json"
+    if tcd_cache.exists() and not force:
+        tcd_features = _json.loads(tcd_cache.read_text(encoding="utf-8"))
+    else:
+        print(f"  TCDページ解析中: {tcd_url}...")
+        tcd_features = fetch_cited_page_features(tcd_url)
+        tcd_cache.write_text(_json.dumps(tcd_features, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result: dict[str, dict] = {}
+    for query, pages in citation_analysis.items():
+        print(f"  機械分析中: 「{query}」...")
+        common = analyze_common_elements(pages)
+        gap    = compute_tcd_gap(common, tcd_features)
+        result[query] = {"common_elements": common, "tcd_gap": gap, "insight": {}}
+
+    cache_path.write_text(_json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  インサイト保存: {cache_path}")
+    print(f"  ※ GPT考察は Claude Code で追記: {cache_path}")
+    return result
 
 
 def kw_compare(cdf: pd.DataFrame, pdf: pd.DataFrame, keywords: list[str]) -> list[dict]:
@@ -593,6 +944,159 @@ def detect_aio_anomalies(qdf: pd.DataFrame, min_impr: int = 100, top_n: int = 10
     )
     top = df[df["aio"] > 0.4].nlargest(top_n, "aio")
     return top[["query", "impressions", "clicks", "ctr", "position", "aio"]].to_dict("records")
+
+
+def gen_actionable_findings(data: dict, has_prev: bool) -> list[dict]:
+    """施策価値の高い発見を {discovery, insight, action} 構造で返す。
+    優先順位: 順位10〜20位 > CTR異常値 > 急上昇 > Imp上位（フォールバック）
+    """
+    all_items = (
+        [(r, r.get("query", ""), "kw")  for r in data["key_kws"]] +
+        [(r, r.get("name",  ""), "svc") for r in data["service_pages"]] +
+        [(r, r.get("name",  ""), "aio") for r in data["aio_pages"]] +
+        [(r, r.get("name",  ""), "def") for r in data["def_pages"]]
+    )
+    findings: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(f: dict, key: str) -> bool:
+        if key in seen or len(findings) >= 4:
+            return False
+        seen.add(key)
+        findings.append(f)
+        return True
+
+    # Priority 1: 順位10〜20位（ランクアップ改善余地）
+    for r, name, kind in sorted(
+        [(r, n, k) for r, n, k in all_items
+         if 10 <= r["cur"]["position"] <= 20 and r["cur"]["impressions"] >= MIN_IMP_FINDING],
+        key=lambda x: -x[0]["cur"]["impressions"],
+    )[:2]:
+        cd = r["cur"]
+        _add({
+            "discovery": f'「{name}」が {fi(cd["impressions"])} Imp・順位 {cd["position"]:.0f} 位',
+            "insight":   f'順位10〜20位はクリック獲得の改善余地が大きいゾーン。現在CTR {fp(cd["ctr"])} にとどまっている',
+            "action":    "内部リンク強化・関連記事追加・FAQ追加によるトップ10入りを狙う",
+        }, name)
+
+    # Priority 2: CTR異常値（上位順位なのに期待CTRの50%未満）
+    for r, name, kind in all_items:
+        cd = r["cur"]
+        if cd["impressions"] < MIN_IMP_AIO or cd["position"] <= 0 or cd["position"] > 10:
+            continue
+        pos_int  = max(1, min(10, round(cd["position"])))
+        expected = EXPECTED_CTR_BY_POS.get(pos_int, 0.022)
+        if cd["ctr"] < expected * 0.5:
+            _add({
+                "discovery": f'「{name}」が順位 {cd["position"]:.0f} 位・{fi(cd["impressions"])} Imp に対してCTR {fp(cd["ctr"])}',
+                "insight":   f'期待CTR {expected*100:.1f}% の実現率が {cd["ctr"]/expected*100:.0f}% にとどまっている。タイトル・snippetの訴求が弱い可能性',
+                "action":    "titleタグ・metaDescriptionの見直し。Definition構造の再設計を検討",
+            }, name + "_ctr")
+
+    # Priority 3: 急上昇（前週比 3位以上改善）
+    if has_prev:
+        for r, name, kind in sorted(
+            [(r, n, k) for r, n, k in all_items
+             if r.get("pos_chg") is not None
+             and r["pos_chg"] < -RANK_CHG_MIN
+             and r["cur"]["impressions"] >= MIN_IMP_FINDING],
+            key=lambda x: x[0]["pos_chg"],
+        )[:1]:
+            cd = r["cur"]
+            _add({
+                "discovery": f'「{name}」の順位が {abs(r["pos_chg"]):.0f} 位改善（{r["prv"]["position"]:.0f}位→{cd["position"]:.0f}位）',
+                "insight":   "順位改善の勢いがある。この機会にさらなる上位定着を狙える",
+                "action":    "関連キーワードでの内部リンク追加・コンテンツ補強で上位定着を図る",
+            }, name + "_rise")
+
+    # Fallback: Imp上位
+    if not findings:
+        for r, name, kind in sorted(all_items, key=lambda x: -x[0]["cur"]["impressions"])[:2]:
+            cd = r["cur"]
+            if cd["impressions"] < MIN_IMP_FINDING:
+                continue
+            _add({
+                "discovery": f'「{name}」が {fi(cd["impressions"])} Imp・順位 {cd["position"]:.0f} 位',
+                "insight":   "最も検索露出が多い項目。今後のデータ蓄積のベースラインとなる",
+                "action":    "コンテンツ品質維持・内部リンク整備を継続する",
+            }, name)
+
+    if not findings:
+        findings.append({
+            "discovery": "データ蓄積中",
+            "insight":   "次週以降の比較対象としてベースラインを記録した",
+            "action":    "引き続きデータ蓄積を継続する",
+        })
+    return findings
+
+
+def gen_actionable_issues(data: dict, has_prev: bool) -> list[dict]:
+    """課題と施策案を {issue, probable_cause, recommended_action} 構造で返す。
+    自動判定: rank_over_20 | rank_under_10_and_ctr_low | impressions_high_and_click_zero
+    """
+    all_items = (
+        [(r, r.get("query", ""), "kw")  for r in data["key_kws"]] +
+        [(r, r.get("name",  ""), "svc") for r in data["service_pages"]] +
+        [(r, r.get("name",  ""), "aio") for r in data["aio_pages"]] +
+        [(r, r.get("name",  ""), "def") for r in data["def_pages"]]
+    )
+    issues: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(issue: dict, key: str) -> bool:
+        if key in seen or len(issues) >= 4:
+            return False
+        seen.add(key)
+        issues.append(issue)
+        return True
+
+    # Rule 1: 順位20位以上 → 順位課題
+    for r, name, kind in sorted(
+        [(r, n, k) for r, n, k in all_items
+         if r["cur"]["position"] > 20 and r["cur"]["impressions"] >= MIN_IMP_FINDING],
+        key=lambda x: -x[0]["cur"]["impressions"],
+    )[:2]:
+        cd = r["cur"]
+        _add({
+            "issue":              f'順位課題：「{name}」が {cd["position"]:.0f} 位（{fi(cd["impressions"])} Imp）',
+            "probable_cause":     "内部リンクの不足・コンテンツ網羅性・被リンク不足の可能性",
+            "recommended_action": "内部リンク追加 / 関連記事追加 / FAQ追加 / 構造化マークアップ改善",
+        }, name + "_rank")
+
+    # Rule 2: 順位10位以内・CTR低 → CTR課題
+    for r, name, kind in all_items:
+        cd = r["cur"]
+        if cd["impressions"] < MIN_IMP_AIO or cd["position"] <= 0 or cd["position"] > 10:
+            continue
+        pos_int  = max(1, min(10, round(cd["position"])))
+        expected = EXPECTED_CTR_BY_POS.get(pos_int, 0.022)
+        if cd["ctr"] < expected * 0.5:
+            _add({
+                "issue":              f'CTR課題：「{name}」が順位 {cd["position"]:.0f} 位でCTR {fp(cd["ctr"])}（期待値 {expected*100:.1f}%）',
+                "probable_cause":     "タイトルの訴求力不足・メタディスクリプション最適化余地・AI Overview によるCTR吸収の可能性",
+                "recommended_action": "titleタグ改善 / description改善 / Definition構造の再設計",
+            }, name + "_ctr")
+
+    # Rule 3: Imp高・クリックゼロ → 検索結果訴求不足
+    for r, name, kind in sorted(
+        [(r, n, k) for r, n, k in all_items
+         if r["cur"]["impressions"] >= MIN_IMP_FINDING and r["cur"]["clicks"] == 0],
+        key=lambda x: -x[0]["cur"]["impressions"],
+    )[:1]:
+        cd = r["cur"]
+        _add({
+            "issue":              f'検索結果訴求不足：「{name}」が {fi(cd["impressions"])} Imp に対してクリックゼロ',
+            "probable_cause":     "検索意図とコンテンツのズレ・タイトル訴求不足・または順位が低すぎる",
+            "recommended_action": "タイトル改善 / 概要文改善 / 検索意図に合わせたコンテンツ見直し",
+        }, name + "_noimp")
+
+    if not issues:
+        issues.append({
+            "issue":              "明確な課題は現時点では検出なし",
+            "probable_cause":     "データ蓄積が少ない、または全体的に安定している状態",
+            "recommended_action": "引き続きデータ蓄積を継続し、来週以降の推移を確認する",
+        })
+    return issues
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -842,9 +1346,10 @@ def gen_markdown(data: dict, config: dict) -> str:
         ]
         for r in gaio:
             aio  = "✅ あり" if r.get("aio_exists") else ("⬜ なし" if r.get("aio_exists") is False else "?")
-            tcd_c = "✅" if r.get("tcd_cited") else "なし"
-            tcd_m = "✅" if r.get("tcd_mentioned") else "なし"
-            comp  = "・".join(r.get("competitor_domains", [])[:3]) or "-"
+            _fetch_failed = r.get("status") == "AIO_DETAIL_FETCH_FAILED"
+            tcd_c = "判定不能" if _fetch_failed else ("✅ あり" if r.get("tcd_cited") else "なし")
+            tcd_m = "判定不能" if _fetch_failed else ("✅" if r.get("tcd_mentioned") else "なし")
+            comp  = "・".join(r.get("competitor_domains", [])[:3]) or ("-" if not _fetch_failed else "判定不能")
             md.append(f"| {r['query']} | {r.get('status','')} | {aio} | {tcd_c} | {tcd_m} | {comp} |")
         md.append("")
         for r in gaio:
@@ -1048,18 +1553,34 @@ def gen_html(data: dict, config: dict) -> str:
             f'padding:16px 20px;color:{TEXT};font-size:14px;line-height:1.8;">{html}</div></td></tr>'
         )
 
-    def finding_row(text: str) -> str:
+    def finding_card(d: dict) -> str:
+        disc = esc(d.get("discovery", ""))
+        data_txt = esc(d.get("supporting_data", d.get("insight", "")))
+        body = (
+            f'<div style="font-size:12px;color:{MUTED};padding-left:8px;border-left:2px solid {BORDER};">{data_txt}</div>'
+        ) if data_txt else ""
         return (
             f'<tr><td style="padding-bottom:8px;">'
-            f'<div style="background:{INFO_BG};border-left:4px solid {CYAN};border-radius:0 5px 5px 0;'
-            f'padding:11px 16px;color:{TEXT};font-size:13px;line-height:1.6;">&#128269; {esc(text)}</div></td></tr>'
+            f'<div style="background:{INFO_BG};border-left:4px solid {CYAN};border-radius:0 6px 6px 0;padding:10px 16px;">'
+            f'<div style="font-size:13px;color:{TEXT};margin-bottom:{("6px" if data_txt else "0")};font-weight:500;">&#128269; {disc}</div>'
+            f'{body}'
+            f'</div></td></tr>'
         )
 
-    def hypothesis_row(text: str) -> str:
+    def issue_card(d: dict) -> str:
+        iss  = esc(d.get("issue",              ""))
+        caus = esc(d.get("probable_cause",     ""))
+        rec  = esc(d.get("recommended_action", ""))
         return (
-            f'<tr><td style="padding-bottom:8px;">'
-            f'<div style="background:{HYPO_BG};border-left:4px solid #cbd5e1;border-radius:0 5px 5px 0;'
-            f'padding:11px 16px;color:{TEXT};font-size:13px;line-height:1.6;">&#128270; {esc(text)}</div></td></tr>'
+            f'<tr><td style="padding-bottom:10px;">'
+            f'<div style="background:{HYPO_BG};border-left:4px solid {DOWN};border-radius:0 6px 6px 0;padding:12px 16px;">'
+            f'<div style="font-size:11px;font-weight:700;color:{DOWN};letter-spacing:.5px;margin-bottom:4px;text-transform:uppercase;">課題</div>'
+            f'<div style="font-size:13px;color:{TEXT};margin-bottom:8px;">&#9888; {iss}</div>'
+            f'<div style="font-size:11px;font-weight:700;color:{MUTED};letter-spacing:.5px;margin-bottom:3px;text-transform:uppercase;">推定要因</div>'
+            f'<div style="font-size:12px;color:{TEXT};margin-bottom:8px;padding-left:8px;border-left:2px solid {BORDER};">{caus}</div>'
+            f'<div style="font-size:11px;font-weight:700;color:{NAVY};letter-spacing:.5px;margin-bottom:3px;text-transform:uppercase;">推奨施策</div>'
+            f'<div style="font-size:12px;color:{NAVY};font-weight:600;padding-left:8px;border-left:2px solid {CYAN};">&#10148; {rec}</div>'
+            f'</div></td></tr>'
         )
 
     def check_row(text: str) -> str:
@@ -1167,129 +1688,67 @@ def gen_html(data: dict, config: dict) -> str:
             rows += data_row + "</tr>\n"
         return wrap_table(hdr, rows)
 
-    # ── 今月の発見（実数値あり） ──
-    def gen_findings() -> list[str]:
-        found = []
-
-        if kw_active:
-            top = kw_active[0]
-            cd  = top["cur"]
-            vals = [f'{fi(cd["impressions"])} Imp']
-            if cd["clicks"] > 0:
-                vals.append(f'{fi(cd["clicks"])} Click')
-            if cd["position"] > 0:
-                vals.append(f'順位 {cd["position"]:.1f} 位')
-            found.append(f'重点KWでは「{top["query"]}」が {" ・ ".join(vals)} で最も露出している。')
-
-        if svc_active:
-            top = svc_active[0]
-            cd  = top["cur"]
-            vals = [f'{fi(cd["impressions"])} Imp']
-            if cd["position"] > 0:
-                vals.append(f'順位 {cd["position"]:.1f} 位')
-            found.append(f'サービス系では「{top["name"]}」が {" ・ ".join(vals)} で先行している。')
-
-        if aio_active:
-            top = aio_active[0]
-            cd  = top["cur"]
-            vals = [f'{fi(cd["impressions"])} Imp']
-            if cd["position"] > 0:
-                vals.append(f'順位 {cd["position"]:.1f} 位')
-            found.append(f'サービスDefinition系では「{top["name"]}」が {" ・ ".join(vals)} で先行している。')
-
-        if def_active:
-            top = def_active[0]
-            cd  = top["cur"]
-            found.append(f'マガジン系では「{top["name"]}」が {fi(cd["impressions"])} Imp で最も検索露出を獲得している。')
-
-        if lp_active:
-            top = lp_active[0]
-            cd  = top["cur"]
-            vals = [f'{fi(cd["impressions"])} Imp']
-            if cd["clicks"] > 0:
-                vals.append(f'{fi(cd["clicks"])} Click')
-            found.append(f'「{top["name"]}」は {" ・ ".join(vals)} を記録している（初期値）。')
-
-        # 順位10位以内到達（Rule 5: imp>=30）
-        top10 = sorted(
-            [r for r in kw_active + svc_active + aio_active + def_active
-             if 0 < r["cur"]["position"] <= 10 and r["cur"]["impressions"] >= MIN_IMP_FINDING],
-            key=lambda x: x["cur"]["position"]
-        )
-        if top10:
-            best = top10[0]
-            cd   = best["cur"]
-            name = best.get("query") or best.get("name", "")
-            found.append(f'「{name}」が順位 {cd["position"]:.1f} 位で検索上位10位以内に到達している（初期値）。')
-
-        if not found:
-            found.append("データ蓄積中。次月以降の比較対象としてベースラインを記録した。")
-        return found[:5]
-
-    # ── 今月の仮説（観察ベース・スクリーニングルール適用） ──
-    def gen_hypothesis() -> list[str]:
-        hypos = []
-
-        # CTR確認候補（Rule 2: imp>=50, pos<=15, ctr<=1%）
-        for r in data["key_kws"]:
-            cd = r["cur"]
-            if cd["impressions"] >= MIN_IMP_AIO and 0 < cd["position"] <= MAX_POS_AIO:
-                expected = EXPECTED_CTR_BY_POS.get(max(1, min(10, round(cd["position"]))), 0.02)
-                if cd["ctr"] < expected * 0.5 and cd["ctr"] <= MAX_CTR_AIO:
-                    hypos.append(
-                        f'「{r["query"]}」は順位 {cd["position"]:.0f} 位・{fi(cd["impressions"])} Imp に対して'
-                        f'CTRは {cd["ctr"]*100:.1f}% にとどまっている。'
-                    )
-        for r in data["service_pages"] + data["aio_pages"]:
-            cd = r["cur"]
-            if cd["impressions"] >= MIN_IMP_AIO and 0 < cd["position"] <= MAX_POS_AIO:
-                expected = EXPECTED_CTR_BY_POS.get(max(1, min(10, round(cd["position"]))), 0.02)
-                if cd["ctr"] < expected * 0.4 and cd["ctr"] <= MAX_CTR_AIO:
-                    hypos.append(
-                        f'「{r["name"]}」は {fi(cd["impressions"])} Imp・順位 {cd["position"]:.0f} 位に対して'
-                        f'クリック率が {cd["ctr"]*100:.1f}% にとどまっている。'
-                    )
-
-        # Definition記事: imp>=30, クリックゼロ（Rule 1）
-        def_zero = sorted(
-            [r for r in data["def_pages"]
-             if r["cur"]["impressions"] >= MIN_IMP_FINDING and r["cur"]["clicks"] == 0],
-            key=lambda x: -x["cur"]["impressions"]
-        )
-        if def_zero:
-            r = def_zero[0]
-            hypos.append(
-                f'「{r["name"]}」は {fi(r["cur"]["impressions"])} Imp の表示があるが、クリックは発生していない。'
-            )
-
-        # 順位変化確認候補（Rule 4: 週次モード、imp>=50、変化>=3位）
+    # ── LP監視テーブル（上位クエリ付き） ──
+    def lp_table_with_queries(items: list[dict], name_fn) -> str:
+        cmp_label = "前週比" if period_type == "weekly" else "前月比"
         if has_global_prev:
-            tracked = (
-                [(r, r.get("query", "")) for r in data["key_kws"]] +
-                [(r, r.get("name",  "")) for r in data["service_pages"] + data["aio_pages"]]
+            col_count = 6
+            hdr = (
+                th("IMP", "right", "65") + th("Click", "right", "55") +
+                th("CTR", "right", "55") + th("順位",  "right", "55") +
+                th(f"{cmp_label}(Click)", "right", "90") + th(f"{cmp_label}(順位)", "right", "90")
             )
-            for r, name in tracked:
-                if (r["prv"]["impressions"] >= MIN_IMP_AIO and
-                        r["cur"]["impressions"] >= MIN_IMP_AIO and
-                        abs(r["pos_chg"]) >= RANK_CHG_MIN):
-                    direction = "改善" if r["pos_chg"] < 0 else "低下"
-                    hypos.append(
-                        f'「{name}」の順位が {abs(r["pos_chg"]):.1f} 位{direction}している'
-                        f'（{r["prv"]["position"]:.0f} 位 → {r["cur"]["position"]:.0f} 位）。'
-                    )
-
-        # 地域系KW（imp < MIN_IMP_FINDING）
-        weak_region = [
-            r for r in data["key_kws"]
-            if "大阪" in r["query"] and r["cur"]["impressions"] < MIN_IMP_FINDING
-        ]
-        if weak_region:
-            names = "・".join(f'「{r["query"]}」' for r in weak_region)
-            hypos.append(f'{names} は表示回数が少ない状態。')
-
-        if not hypos:
-            hypos.append("観察対象となる数値変化は次月以降に整理する。現時点では初期値として記録する。")
-        return hypos[:5]
+        else:
+            col_count = 4
+            hdr = (
+                th("IMP",   "right", "80") + th("Click", "right", "70") +
+                th("CTR",   "right", "70") + th("順位",  "right", "70")
+            )
+        rows = ""
+        for r in items:
+            cd      = r["cur"]
+            has_cur = cd["impressions"] > 0
+            rows += (
+                f'<tr><td colspan="{col_count}" style="padding:9px 12px;font-size:13px;'
+                f'font-weight:700;border-bottom:1px solid {BORDER};color:{NAVY};">'
+                f'{name_fn(r)}</td></tr>\n'
+            )
+            ctr_val = fp(cd["ctr"])        if has_cur else f'<span style="color:{MUTED};">-</span>'
+            pos_val = fpos(cd["position"]) if has_cur else f'<span style="color:{MUTED};">-</span>'
+            data_row = (
+                '<tr style="background:#f8fafc;">'
+                + td_cell(fi(cd["impressions"]), "right")
+                + td_cell(fi(cd["clicks"]),      "right")
+                + td_cell(ctr_val,               "right")
+                + td_cell(pos_val,               "right")
+            )
+            if has_global_prev:
+                has_prev2 = r["prv"]["impressions"] > 0
+                ref_span  = f'<span style="color:{MUTED};font-size:11px;">参考値</span>'
+                cl_cell   = td_cell(
+                    ref_span if r["prv"]["clicks"] < 3 else chg_span(r["click_chg"]), "right"
+                )
+                if not has_prev2:
+                    pos_cell = td_cell(f'<span style="color:{MUTED};font-size:11px;">比較対象なし</span>', "right")
+                elif cd["impressions"] < MIN_IMP_FINDING:
+                    pos_cell = td_cell(ref_span, "right")
+                else:
+                    pos_cell = td_cell(pos_span(r["pos_chg"]), "right")
+                data_row += cl_cell + pos_cell
+            rows += data_row + "</tr>\n"
+            top_qs = r.get("top_queries", [])
+            if top_qs:
+                tags = "　".join(
+                    f'<span style="background:#e8f4fd;border-radius:3px;padding:2px 6px;'
+                    f'font-size:11px;color:{NAVY};">{esc(q)}</span>'
+                    for q in top_qs
+                )
+                rows += (
+                    f'<tr><td colspan="{col_count}" style="padding:5px 12px 9px;'
+                    f'font-size:11px;color:{MUTED};border-bottom:1px solid {BORDER};">'
+                    f'&#128269; 流入クエリ TOP5: {tags}</td></tr>\n'
+                )
+        return wrap_table(hdr, rows)
 
     # ── 次月確認ポイント ──
     def gen_html_checkpoints() -> list[str]:
@@ -1365,19 +1824,19 @@ def gen_html(data: dict, config: dict) -> str:
         title = esc(r.get("title") or r["name"])
         return f'<a href="{esc(r["url"])}" style="color:{NAVY};text-decoration:none;">{title}</a>'
 
-    findings_html    = "".join(finding_row(f)    for f in gen_findings())
-    hypothesis_html  = "".join(hypothesis_row(h) for h in gen_hypothesis())
-    checkpoints_html = "".join(check_row(c)      for c in gen_html_checkpoints())
+    findings_html    = "".join(finding_card(f) for f in gen_actionable_findings(data, has_global_prev))
+    hypothesis_html  = "".join(issue_card(i)  for i in gen_actionable_issues(data, has_global_prev))
+    checkpoints_html = "".join(check_row(c)   for c in gen_html_checkpoints())
 
     # ── Google AI Overview セクション（SerpAPI）──
     def _google_aio_section() -> str:
-        gaio = data.get("google_aio", [])
+        gaio     = data.get("google_aio", [])
+        aio_diff = data.get("aio_diff", {})
         title_html = sec_title("3", "Google AI Overview 観測")
         note_row = (
             f'<tr><td style="padding-bottom:8px;">'
             f'<p style="color:{MUTED};font-size:11px;margin:0;">'
-            f'SerpAPI 経由で Google 検索上の AI Overview（AIによる概要）を観測しています。'
-            f'取得失敗はAIOなしとは区別します。'
+            f'SerpAPI 経由で AI Overview の有無・TCD引用・競争状況を観測。引用数の変化とTCD引用獲得状況を時系列で追跡します。'
             f'</p></td></tr>'
         )
         no_real_data = all(r.get("status") == "API_KEY_MISSING" for r in gaio) if gaio else True
@@ -1389,72 +1848,379 @@ def gen_html(data: dict, config: dict) -> str:
                 f'観測データなし（SERPAPI_API_KEY 未設定または無効）。</p></td></tr>'
             )
 
+        ORANGE = "#f59e0b"
+
+        # ── 今週のAIO所見（機械集計）──
+        aio_count  = sum(1 for r in gaio if r.get("aio_exists"))
+        tcd_cited_list = [r["query"] for r in gaio if r.get("tcd_cited")]
+        new_cited  = [q for q, d in aio_diff.items() if d.get("status") == "tcd_newly_cited"]
+        lost_cited = [q for q, d in aio_diff.items() if d.get("status") == "tcd_lost_citation"]
+        # 競合引用ドメイン集計（全クエリ合計）
+        from collections import Counter as _Counter
+        comp_dom_counter: _Counter = _Counter()
+        for r in gaio:
+            if r.get("aio_exists") and r.get("status") != "AIO_DETAIL_FETCH_FAILED":
+                real_u = [u for u in r.get("cited_urls", []) if "google.com/searchviewer" not in u]
+                for u in real_u:
+                    d = _extract_domain(u)
+                    if not any(p in d for p in ["tcd.jp"]):
+                        comp_dom_counter[d] += 1
+        top_comp = [d for d, _ in comp_dom_counter.most_common(3)]
+
+        obs_items = []
+        obs_items.append(
+            f'{len(gaio)}クエリ中 {aio_count}クエリでAIOが出現'
+        )
+        if tcd_cited_list:
+            obs_items.append(f'TCD引用あり: {" / ".join(tcd_cited_list)}')
+        else:
+            obs_items.append('TCDはいずれのクエリでも引用されていない')
+        if top_comp:
+            obs_items.append(f'引用競合上位: {" / ".join(top_comp)}')
+        if new_cited:
+            obs_items.append(f'新規引用獲得: {" / ".join(new_cited)}')
+        if lost_cited:
+            obs_items.append(f'引用消失: {" / ".join(lost_cited)}')
+        if not new_cited and not lost_cited:
+            obs_items.append('前週から引用状況に大きな変化なし')
+
+        obs_html = "".join(
+            f'<li style="font-size:12px;color:{TEXT};margin-bottom:4px;">{esc(item)}</li>'
+            for item in obs_items
+        )
+        summary_row = (
+            f'<tr><td style="padding-bottom:12px;">'
+            f'<div style="background:{INFO_BG};border-left:3px solid {CYAN};border-radius:0 6px 6px 0;padding:10px 14px;">'
+            f'<div style="font-size:11px;font-weight:700;color:{CYAN};letter-spacing:.5px;margin-bottom:6px;text-transform:uppercase;">今週のAIO所見</div>'
+            f'<ul style="margin:0;padding-left:16px;">{obs_html}</ul>'
+            f'</div></td></tr>'
+        )
+
+        # ── テーブル（クエリ | TCD | 前週比）──
         hdr = (
-            th("クエリ", "left", "150") +
-            th("AIO有無", "center", "70") +
-            th("TCD引用", "center", "70") +
-            th("引用URL（上位）") +
-            th("競合引用", "left", "120")
+            th("クエリ",  "left",   "180") +
+            th("TCD",    "center", "80")  +
+            th("引用数", "center", "60")  +
+            th("前週比", "center", "100")
         )
         rows_html = ""
-        _STATUS_LABEL = {
-            "OK_WITH_AIO": ("AIOあり",   UP),
-            "OK_NO_AIO":   ("AIOなし",   MUTED),
-            "FETCH_ERROR": ("取得失敗",  DOWN),
-            "API_KEY_MISSING": ("APIキー未設定", DOWN),
-        }
         for r in gaio:
-            status = r.get("status", "OK_NO_AIO")
-            s_label, s_color = _STATUS_LABEL.get(status, (status, MUTED))
+            status       = r.get("status", "OK_NO_AIO")
+            aio_exists   = r.get("aio_exists", False)
+            fetch_failed = (status == "AIO_DETAIL_FETCH_FAILED")
 
-            tcd_cited = r.get("tcd_cited", False)
-            tcd_color = UP if tcd_cited else MUTED
-            tcd_txt   = "&#9989; 引用あり" if tcd_cited else ("言及のみ" if r.get("tcd_mentioned") else "なし")
+            # TCD列
+            if not aio_exists:
+                tcd_txt   = "AIOなし"
+                tcd_color = MUTED
+            elif fetch_failed:
+                tcd_txt   = "判定不能"
+                tcd_color = ORANGE
+            elif r.get("tcd_cited"):
+                tcd_txt   = "引用あり"
+                tcd_color = UP
+            else:
+                tcd_txt   = "引用なし"
+                tcd_color = MUTED
 
-            urls = r.get("cited_urls", [])
-            url_html = "<br>".join(
-                f'<a href="{esc(u)}" style="color:{CYAN};font-size:11px;text-decoration:none;">{esc(_extract_domain(u))}</a>'
-                for u in urls[:3]
-            ) or f'<span style="color:{MUTED};font-size:11px;">-</span>'
+            # 前週比列
+            diff_info   = aio_diff.get(r["query"], {})
+            diff_status = diff_info.get("status", "no_previous_data")
+            if fetch_failed:
+                diff_label, diff_color = "判定不能", ORANGE
+            elif diff_status == "tcd_newly_cited":
+                diff_label, diff_color = "新規引用", UP
+            elif diff_status == "tcd_lost_citation":
+                diff_label, diff_color = "引用消失", DOWN
+            elif diff_status == "no_change" and r.get("tcd_cited"):
+                diff_label, diff_color = "引用継続", UP
+            else:
+                diff_label, diff_color = "変化なし", MUTED
 
-            comp = "・".join(esc(d) for d in r.get("competitor_domains", [])[:3]) or "-"
+            # 引用数（Google searchviewer除く実URL）
+            real_urls_count = [
+                u for u in r.get("cited_urls", [])
+                if "google.com/searchviewer" not in u
+            ]
+            if not aio_exists:
+                cite_count_txt   = "－"
+                cite_count_color = MUTED
+            elif fetch_failed:
+                cite_count_txt   = "取得失敗"
+                cite_count_color = ORANGE
+            else:
+                cite_count_txt   = str(len(real_urls_count)) + "件"
+                cite_count_color = TEXT
 
             rows_html += (
                 "<tr>"
                 + td_cell(esc(r["query"]))
-                + td_cell(f'<span style="color:{s_color};font-weight:700;">{s_label}</span>', "center")
                 + td_cell(f'<span style="color:{tcd_color};font-weight:700;">{tcd_txt}</span>', "center")
-                + td_cell(url_html)
-                + td_cell(f'<span style="font-size:12px;">{comp}</span>')
+                + td_cell(f'<span style="color:{cite_count_color};font-weight:700;">{cite_count_txt}</span>', "center")
+                + td_cell(f'<span style="color:{diff_color};font-weight:700;">{diff_label}</span>', "center")
                 + "</tr>\n"
             )
-            if tcd_cited and r.get("tcd_cited_urls"):
-                tcd_url_html = "・".join(
-                    f'<a href="{esc(u)}" style="color:{UP};font-size:11px;">{esc(_extract_domain(u))}</a>'
+
+            # 2行目: TCD引用URL
+            if not fetch_failed and r.get("tcd_cited") and r.get("tcd_cited_urls"):
+                tcd_url_html = "　".join(
+                    f'<a href="{esc(u)}" style="color:{UP};font-size:11px;text-decoration:none;">'
+                    f'&#9989; {esc(_extract_domain(u))}</a>'
                     for u in r["tcd_cited_urls"][:2]
                 )
                 rows_html += (
-                    f'<tr style="background:#f0fdf4;"><td colspan="5" '
-                    f'style="padding:5px 10px 7px;font-size:11px;color:{UP};">'
-                    f'&#9989; TCD引用URL: {tcd_url_html}</td></tr>\n'
+                    f'<tr style="background:#f0fdf4;"><td colspan="4" '
+                    f'style="padding:4px 12px 6px;font-size:11px;">'
+                    f'<span style="color:{UP};font-weight:700;">TCD引用URL:</span> {tcd_url_html}</td></tr>\n'
                 )
-            elif r.get("aio_text") and r.get("aio_exists"):
+
+            # 2行目: 競合引用URL（TCD除外・Google除外・上位3件）
+            real_urls = [
+                u for u in r.get("cited_urls", [])
+                if "google.com/searchviewer" not in u
+            ]
+            comp_urls = [
+                u for u in real_urls
+                if not any(p in u.lower() for p in ["tcd.jp", "株式会社tcd"])
+            ][:3]
+            if not fetch_failed and aio_exists and comp_urls:
+                comp_links = "　".join(
+                    f'<a href="{esc(u)}" style="color:{CYAN};font-size:11px;text-decoration:none;">'
+                    f'{esc(_extract_domain(u))}</a>'
+                    for u in comp_urls
+                )
                 rows_html += (
-                    f'<tr style="background:#f8fafc;"><td colspan="5" '
-                    f'style="padding:5px 10px 7px;font-size:11px;color:{MUTED};">'
-                    f'&#128203; AIO抜粋: {esc((r["aio_text"] or "")[:120])}…</td></tr>\n'
+                    f'<tr style="background:#f8fafc;"><td colspan="4" '
+                    f'style="padding:4px 12px 6px;font-size:11px;color:{MUTED};">'
+                    f'&#128279; 競合引用: {comp_links}</td></tr>\n'
+                )
+            elif fetch_failed:
+                rows_html += (
+                    f'<tr style="background:#fffbeb;"><td colspan="4" '
+                    f'style="padding:4px 12px 6px;font-size:11px;color:{ORANGE};">'
+                    f'&#9888; AIOあり・引用詳細取得失敗。TCD引用の有無は判定できません。</td></tr>\n'
                 )
 
         table_html = wrap_table(hdr, rows_html)
-        return title_html + note_row + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
+        return title_html + note_row + summary_row + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
+
+    # ── AIO引用競合コンテンツ分析セクション ──
+    def _citation_analysis_section() -> str:
+        ca       = data.get("citation_analysis", {})
+        insights = data.get("citation_insights", {})
+        if not ca and not insights:
+            return ""
+
+        CT_COLOR = {
+            "FAQ型":      "#7c3aed",
+            "定義型":     "#0369a1",
+            "リスト比較型":"#0f766e",
+            "ハウツー型":  "#c2410c",
+            "その他":     MUTED,
+        }
+        PRI_COLOR = {"A": DOWN, "B": "#f59e0b", "C": MUTED}
+        title_html = sec_title("3.5", "AIO引用競合コンテンツ分析")
+        note_row = (
+            f'<tr><td style="padding-bottom:10px;">'
+            f'<p style="color:{MUTED};font-size:11px;margin:0;">'
+            f'引用競合の共通要素・TCDとの差分・AIO施策優先順位を自動生成します。'
+            f'</p></td></tr>'
+        )
+        body = ""
+
+        # ── クエリ別ブロック ──
+        all_queries = set(list(ca.keys()) + list(insights.keys()))
+        for query in all_queries:
+            pages   = ca.get(query, [])
+            insight = insights.get(query, {})
+            common  = insight.get("common_elements", {})
+            gap     = insight.get("tcd_gap", {})
+            gpt     = insight.get("insight", {})
+
+            body += (
+                f'<tr><td style="padding:16px 0 8px;">'
+                f'<div style="font-size:14px;font-weight:700;color:{NAVY};">&#128269; {esc(query)}</div>'
+                f'</td></tr>\n'
+            )
+
+            # ── 3列グリッド: 共通要素 / TCD差分 / GPT考察 ──
+            # 共通要素
+            topic_rows = "".join(
+                f'<div style="font-size:11px;margin-bottom:3px;">&#10003; {esc(t["label"])}'
+                f'<span style="color:{MUTED};font-size:10px;"> {t["count"]}/{t["total"]}社</span></div>'
+                for t in common.get("common_topics", [])
+            ) or f'<div style="font-size:11px;color:{MUTED};">データ不足</div>'
+            ct_label = esc(common.get("dominant_content_type", "－"))
+            faq_str  = common.get("faq_ratio", "－")
+            wc_str   = f'約{common.get("avg_word_count",0)//1000}k字' if common.get("avg_word_count") else "－"
+
+            col_common = (
+                f'<div style="background:{INFO_BG};border-radius:6px;padding:12px 14px;height:100%;box-sizing:border-box;">'
+                f'<div style="font-size:11px;font-weight:700;color:{CYAN};letter-spacing:.5px;margin-bottom:8px;text-transform:uppercase;">競合共通要素</div>'
+                f'<div style="font-size:11px;color:{MUTED};margin-bottom:6px;">'
+                f'タイプ: <strong style="color:{TEXT};">{ct_label}</strong>　'
+                f'FAQ: <strong style="color:{TEXT};">{faq_str}</strong>　'
+                f'文字数: <strong style="color:{TEXT};">{wc_str}</strong></div>'
+                f'{topic_rows}'
+                f'</div>'
+            )
+
+            # TCD差分
+            impl_rows = "".join(
+                f'<div style="font-size:11px;margin-bottom:3px;color:{UP};">&#10003; {esc(x)}</div>'
+                for x in gap.get("implemented", [])
+            ) or f'<div style="font-size:11px;color:{MUTED};">なし</div>'
+            nimpl_rows = "".join(
+                f'<div style="font-size:11px;margin-bottom:3px;color:{DOWN};">&#10005; {esc(x)}</div>'
+                for x in gap.get("not_implemented", [])
+            ) or f'<div style="font-size:11px;color:{MUTED};">なし</div>'
+            tcd_wc = gap.get("tcd_word_count", 0)
+            tcd_wc_str = f'約{tcd_wc//1000}k字' if tcd_wc else "－"
+
+            col_gap = (
+                f'<div style="background:{HYPO_BG};border-radius:6px;padding:12px 14px;height:100%;box-sizing:border-box;">'
+                f'<div style="font-size:11px;font-weight:700;color:{NAVY};letter-spacing:.5px;margin-bottom:8px;text-transform:uppercase;">TCDとの差分</div>'
+                f'<div style="font-size:10px;font-weight:700;color:{UP};margin-bottom:4px;letter-spacing:.3px;">実装済み</div>'
+                f'{impl_rows}'
+                f'<div style="font-size:10px;font-weight:700;color:{DOWN};margin-top:8px;margin-bottom:4px;letter-spacing:.3px;">未実装</div>'
+                f'{nimpl_rows}'
+                f'<div style="font-size:10px;color:{MUTED};margin-top:8px;">TCD文字数: {tcd_wc_str}</div>'
+                f'</div>'
+            )
+
+            body += (
+                f'<tr><td style="padding-bottom:4px;">'
+                f'<table width="100%" cellpadding="0" cellspacing="6"><tr>'
+                f'<td width="50%" valign="top">{col_common}</td>'
+                f'<td width="50%" valign="top">{col_gap}</td>'
+                f'</tr></table></td></tr>\n'
+            )
+
+            # ── 競合ページ詳細（折りたたみ風・小さめ） ──
+            if pages:
+                details = ""
+                for i, p in enumerate(pages, 1):
+                    ct     = p.get("content_type", "その他")
+                    ct_col = CT_COLOR.get(ct, MUTED)
+                    ct_badge = (
+                        f'<span style="background:{ct_col};color:#fff;font-size:9px;font-weight:700;'
+                        f'padding:1px 6px;border-radius:8px;margin-left:5px;">{esc(ct)}</span>'
+                    )
+                    dom   = _extract_domain(p["url"])
+                    ttl   = esc(p.get("title","")[:60]) or esc(dom)
+                    h2s   = "　".join(esc(h[:30]) for h in p.get("h2s",[])[:3])
+                    wc    = p.get("word_count", 0)
+                    wctxt = f'{wc//1000}k字' if wc else "－"
+                    sch   = " ".join(
+                        f'<span style="background:#e0f2fe;color:#0369a1;font-size:9px;padding:1px 5px;border-radius:6px;">{esc(s)}</span>'
+                        for s in p.get("schema_types",[])[:3]
+                    )
+                    ok_flag = p.get("ok", False)
+                    err_txt = f'<span style="color:{DOWN};font-size:10px;">取得失敗</span>' if not ok_flag else ""
+                    h2_div = (f'<div style="font-size:10px;color:{TEXT};margin-top:3px;">H2: {h2s}</div>') if h2s and ok_flag else ""
+                    details += (
+                        f'<div style="border-left:2px solid {ct_col};padding:6px 10px;margin-bottom:6px;background:#fafafa;">'
+                        f'<div style="font-size:11px;font-weight:700;">'
+                        f'<a href="{esc(p["url"])}" style="color:{NAVY};text-decoration:none;">#{i} {ttl}</a>'
+                        f'{ct_badge}{err_txt}</div>'
+                        f'<div style="font-size:10px;color:{MUTED};margin-top:2px;">{esc(dom)}　文字数:{wctxt}　{sch}</div>'
+                        f'{h2_div}'
+                        f'</div>'
+                    )
+                body += (
+                    f'<tr><td style="padding-bottom:16px;">'
+                    f'<div style="font-size:10px;font-weight:700;color:{MUTED};letter-spacing:.5px;margin-bottom:6px;text-transform:uppercase;">'
+                    f'競合ページ詳細（上位{len(pages)}件）</div>'
+                    f'{details}</td></tr>\n'
+                )
+
+        return title_html + note_row + body
+
+    citation_analysis_html = _citation_analysis_section()
 
     google_aio_html = _google_aio_section()
+
+    def _director_section() -> str:
+        import json as _json
+        from datetime import date as _date
+        ORANGE = "#f59e0b"
+        dir_path = Path("reports/aio_director") / f"{_date.today().strftime('%Y-%m-%d')}.json"
+        if not dir_path.exists():
+            return (
+                sec_title("10", "AIOディレクター判断") +
+                f'<tr><td style="padding-bottom:16px;">'
+                f'<div style="background:{HYPO_BG};border-left:4px solid {MUTED};border-radius:0 6px 6px 0;padding:14px 18px;color:{MUTED};font-size:12px;">'
+                f'Claude Code による判断待ち。レポート生成後に別途入力してください。'
+                f'</div></td></tr>'
+            )
+        d = _json.loads(dir_path.read_text(encoding="utf-8"))
+
+        def _bullet_list(items: list, color: str = TEXT) -> str:
+            return "".join(
+                f'<li style="font-size:12px;color:{color};margin-bottom:4px;">{esc(str(x))}</li>'
+                for x in items
+            )
+
+        # 現状
+        state_html = ""
+        cs = d.get("current_state", {})
+        if cs:
+            issues = cs.get("主要課題", cs.get("issues", []))
+            watch  = cs.get("優先監視", cs.get("watch", []))
+            if issues:
+                state_html += f'<div style="font-size:11px;font-weight:700;color:{DOWN};margin-bottom:4px;">主要課題</div><ul style="margin:0 0 8px 0;padding-left:16px;">{_bullet_list(issues, DOWN)}</ul>'
+            if watch:
+                state_html += f'<div style="font-size:11px;font-weight:700;color:{MUTED};margin-bottom:4px;">優先監視</div><ul style="margin:0 0 0 0;padding-left:16px;">{_bullet_list(watch)}</ul>'
+
+        # 判断
+        dec = d.get("decisions", {})
+        dec_html = ""
+        for label, color in [("やる", UP), ("やらない", MUTED), ("保留", ORANGE)]:
+            items = dec.get(label, [])
+            if items:
+                dec_html += f'<div style="font-size:11px;font-weight:700;color:{color};margin-bottom:3px;">{label}</div><ul style="margin:0 0 8px 0;padding-left:16px;">{_bullet_list(items)}</ul>'
+
+        # 次アクション
+        acts = d.get("next_actions", {})
+        act_html = ""
+        for label in ["今週実施", "来週確認", "長期施策"]:
+            items = acts.get(label, [])
+            if items:
+                act_color = UP if label == "今週実施" else (MUTED if label == "長期施策" else TEXT)
+                act_html += f'<div style="font-size:11px;font-weight:700;color:{act_color};margin-bottom:3px;">{label}</div><ul style="margin:0 0 8px 0;padding-left:16px;">{_bullet_list(items)}</ul>'
+
+        # リスク
+        risks = d.get("risks", [])
+        risk_html = ""
+        if risks:
+            risk_html = f'<div style="font-size:11px;font-weight:700;color:{ORANGE};margin-bottom:4px;">リスク</div><ul style="margin:0;padding-left:16px;">{_bullet_list(risks, ORANGE)}</ul>'
+
+        def _card(title: str, content: str, bg: str = "#fff", border: str = BORDER) -> str:
+            return (
+                f'<td valign="top"><div style="background:{bg};border:1px solid {border};border-radius:6px;padding:12px 14px;height:100%;box-sizing:border-box;">'
+                f'<div style="font-size:11px;font-weight:700;color:{NAVY};letter-spacing:.5px;margin-bottom:8px;text-transform:uppercase;">{esc(title)}</div>'
+                f'{content}'
+                f'</div></td>'
+            )
+
+        row_html = (
+            f'<tr><td style="padding-bottom:16px;">'
+            f'<table width="100%" cellpadding="0" cellspacing="6"><tr>'
+            + _card("現状", state_html or f'<span style="color:{MUTED};font-size:11px;">記載なし</span>', HYPO_BG)
+            + _card("判断", dec_html  or f'<span style="color:{MUTED};font-size:11px;">記載なし</span>')
+            + _card("次アクション", act_html or f'<span style="color:{MUTED};font-size:11px;">記載なし</span>', INFO_BG)
+            + _card("リスク", risk_html or f'<span style="color:{MUTED};font-size:11px;">記載なし</span>')
+            + f'</tr></table></td></tr>'
+        )
+        return sec_title("10", "AIOディレクター判断") + row_html
+
+    director_html = _director_section()
 
     kw_table_html  = two_row_table(kw_active,  kw_name)
     svc_table_html = two_row_table(svc_active, page_name)
     aio_table_html = two_row_table(aio_active, page_name)
     def_table_html = two_row_table(def_active, page_name)
-    lp_table_html  = two_row_table(lp_active,  page_name)
+    lp_table_html  = lp_table_with_queries(lp_active, page_name)
 
     kw_note  = hidden_note(kw_hidden,  len(data["key_kws"]))
     svc_note = hidden_note(svc_hidden, len(data["service_pages"]))
@@ -1501,12 +2267,15 @@ def gen_html(data: dict, config: dict) -> str:
 </td></tr>
 {info_box(summary_html())}
 
-<!-- 2. 今週/月の発見 -->
-{sec_title("2", f"今{period_unit}の発見")}
+<!-- 2. 今週/月の発見と対策 -->
+{sec_title("2", f"今{period_unit}の発見と対策")}
 {findings_html}
 
 <!-- 3. Google AI Overview 観測 -->
 {google_aio_html}
+
+<!-- 3.5 AIO引用競合コンテンツ分析 -->
+{citation_analysis_html}
 
 <!-- 4. 重点キーワード監視 -->
 {sec_title("4", "重点キーワード監視")}
@@ -1534,12 +2303,15 @@ def gen_html(data: dict, config: dict) -> str:
 <tr><td style="padding-bottom:4px;">{lp_table_html}</td></tr>
 {lp_note}
 
-<!-- 9. 今週/月の仮説 -->
-{sec_title("9", f"今{period_unit}の仮説")}
+<!-- 9. 課題と施策案 -->
+{sec_title("9", "課題と施策案")}
 {hypothesis_html}
 
-<!-- 10. 次週/月確認ポイント -->
-{sec_title("10", f"次{period_unit}確認ポイント")}
+<!-- 10. AIOディレクター判断 -->
+{director_html}
+
+<!-- 11. 次週/月確認ポイント -->
+{sec_title("11", f"次{period_unit}確認ポイント")}
 {checkpoints_html}
 
 </table>
@@ -1644,16 +2416,23 @@ def main() -> None:
 
     # Google AI Overview 観測
     aio_cfg = config.get("google_aio", {})
+    aio_output_dir = str(Path(args.output_dir) / "google_aio")
     if aio_cfg.get("enabled", False):
         print("Google AI Overview を観測中（SerpAPI）...")
         google_aio_data = fetch_google_aio(
             queries    = aio_cfg.get("queries", []),
             aio_cfg    = aio_cfg,
-            output_dir = str(Path(args.output_dir) / "google_aio"),
+            output_dir = aio_output_dir,
             force      = args.force_aio,
         )
     else:
         google_aio_data = []
+
+    # AIO前週比較
+    from datetime import date as _date
+    _today_str = _date.today().strftime("%Y-%m-%d")
+    _previous_aio = load_previous_aio_cache(aio_output_dir, _today_str)
+    aio_diff_data = compute_aio_diff(google_aio_data, _previous_aio) if google_aio_data and _previous_aio else {}
 
 
     # 集計・分析
@@ -1674,8 +2453,31 @@ def main() -> None:
         "top_queries":    top_queries_cmp(cur_queries, prv_queries, n=top_n),
         "top_pages":      top_pages_cmp(cur_pages, prv_pages, n=top_n),
         "google_aio":     google_aio_data,
+        "aio_diff":       aio_diff_data,
         "period_type":    actual_period,
     }
+
+    # AIO引用競合コンテンツ分析
+    print("AIO引用競合コンテンツ分析中...")
+    data["citation_analysis"] = analyze_aio_citations(
+        google_aio_data,
+        output_dir = str(Path(args.output_dir) / "citation_analysis"),
+        force      = args.force_aio,
+    )
+
+    # 共通要素・TCD差分（機械分析）
+    print("競合インサイト生成中...")
+    data["citation_insights"] = build_citation_insights(
+        data["citation_analysis"],
+        tcd_url    = config["site_url"],
+        output_dir = str(Path(args.output_dir) / "citation_insights"),
+        force      = args.force_aio,
+    )
+
+    # LP上位クエリ取得
+    print("LP上位クエリ取得中...")
+    for lp in data["lp_pages"]:
+        lp["top_queries"] = fetch_page_top_queries(service, site_url, cur_start, cur_end, lp["url"])
 
     # レポート生成
     print("レポート生成中...")
