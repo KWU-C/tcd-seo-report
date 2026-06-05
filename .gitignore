@@ -1,10 +1,14 @@
 # 認証情報・APIキー（絶対にコミットしない）
 credentials.json
 token.pickle
+token_ga4.pickle
 .env
 API key.txt
 SerpApi.txt
 *.key.txt
+
+# 生成ファイル
+preview.html
 
 # 生成レポート（任意でコミット対象にしたい場合はコメントアウト）
 reports/
