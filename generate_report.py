@@ -595,6 +595,67 @@ def detect_aio_anomalies(qdf: pd.DataFrame, min_impr: int = 100, top_n: int = 10
     return top[["query", "impressions", "clicks", "ctr", "position", "aio"]].to_dict("records")
 
 
+def aio_competitor_ranking(gaio: list[dict]) -> tuple[list[dict], int]:
+    """AIOに引用された企業をAIシェア順にランキング化する（TCD含む）。
+    Returns (ranking_list, total_aio_count)
+    """
+    total_aio = sum(1 for r in gaio if r.get("aio_exists"))
+    if total_aio == 0:
+        return [], 0
+
+    counts: dict[str, int] = {}
+    tcd_count = 0
+    for r in gaio:
+        if not r.get("aio_exists"):
+            continue
+        if r.get("tcd_cited"):
+            tcd_count += 1
+        for domain in r.get("cited_domains", []):
+            if "tcd" not in domain.lower():
+                counts[domain] = counts.get(domain, 0) + 1
+
+    ranking = sorted(
+        [{"name": k, "count": v, "share": round(v / total_aio * 100, 1)}
+         for k, v in counts.items()],
+        key=lambda x: -x["count"]
+    )
+    ranking.append({
+        "name": "TCD（自社）",
+        "count": tcd_count,
+        "share": round(tcd_count / total_aio * 100, 1),
+        "is_tcd": True,
+    })
+    return ranking, total_aio
+
+
+def gen_aio_competitor_hypothesis(ranking: list[dict], total_aio: int, period_label: str = "今週") -> str:
+    """AIO競合ランキングの仮説テキストを2〜3文で生成する。"""
+    if not ranking or total_aio == 0:
+        return ""
+    cited = [r for r in ranking if not r.get("is_tcd") and r["count"] > 0]
+    tcd_entry = next((r for r in ranking if r.get("is_tcd")), None)
+    parts = []
+    if cited:
+        top_names = "・".join(r["name"] for r in cited[:2])
+        parts.append(
+            f"{top_names}は、ブランディング会社の比較・一覧コンテンツを保有しており、"
+            f"Googleが検索意図を一度で解決できるページとして評価しているとみられます。"
+        )
+    parts.append(
+        "AIOは「定義→選び方→企業比較一覧」を網羅した長文コンテンツを優先的に引用する傾向があります。"
+    )
+    if tcd_entry and tcd_entry["count"] == 0:
+        parts.append(
+            f"TCDは{period_label}引用0件。比較・一覧型コンテンツの拡充がAIO引用獲得への近道です。"
+        )
+    elif tcd_entry:
+        parts.append(
+            f"TCDは{period_label}AIシェア{tcd_entry['share']:.0f}%を獲得。"
+            f"さらなる引用拡大には比較コンテンツの強化が有効です。"
+        )
+    return "".join(parts)
+
+
 # ────────────────────────────────────────────────────────────────────
 # フォーマット ユーティリティ
 # ────────────────────────────────────────────────────────────────────
@@ -868,24 +929,43 @@ def gen_markdown(data: dict, config: dict) -> str:
                     md.append(f"**競合引用ドメイン**: {', '.join(r['competitor_domains'])}")
                     md.append("")
 
-    # ── 3. サービス系 → 4 ──
-    md += ["## 3. サービス系", ""]
+    # ── 4. AIO競合ランキング ──
+    md += ["## 4. AIO競合ランキング", ""]
+    period_label = "今週" if data.get("period_type") == "weekly" else "今月"
+    ranking, total_aio = aio_competitor_ranking(data.get("google_aio", []))
+    md.append(f"### {period_label}引用された企業（観測AIO: {total_aio}件）")
+    md.append("")
+    if ranking:
+        md += ["| 企業 | AIシェア |", "|------|---------|"]
+        for item in ranking:
+            share_txt = f'{item["count"]}件 ({item["share"]:.0f}%)'
+            md.append(f"| {item['name']} | {share_txt} |")
+        md.append("")
+        hypothesis = gen_aio_competitor_hypothesis(ranking, total_aio, period_label)
+        if hypothesis:
+            md.append(f"> {hypothesis}")
+            md.append("")
+    else:
+        md.append("AIOに引用された企業は検出されませんでした。\n")
+
+    # ── 5. サービス系 ──
+    md += ["## 5. サービス系", ""]
     md.append(_page_table_md(data["service_pages"], site_url))
 
-    # ── 4. サービスDefinition系 ──
-    md += ["## 4. サービスDefinition系", ""]
+    # ── 6. サービスDefinition系 ──
+    md += ["## 6. サービスDefinition系", ""]
     md.append(_page_table_md(data["aio_pages"], site_url))
 
-    # ── 5. マガジン系 ──
-    md += ["## 5. マガジン系", ""]
+    # ── 7. マガジン系 ──
+    md += ["## 7. マガジン系", ""]
     md.append(_page_table_md(data["def_pages"], site_url))
 
-    # ── 6. 重要ページ ──
-    md += ["## 6. 重要ページ分析", ""]
+    # ── 8. 重要ページ ──
+    md += ["## 8. 重要ページ分析", ""]
     md.append(_page_table_md(data["lp_pages"], site_url))
 
-    # ── 7. デバイス別 ──
-    md += ["## 7. デバイス別分析", ""]
+    # ── 9. デバイス別 ──
+    md += ["## 9. デバイス別分析", ""]
     devs = data["devices"]
     if devs:
         md += [
@@ -902,9 +982,9 @@ def gen_markdown(data: dict, config: dict) -> str:
     else:
         md.append("データなし\n")
 
-    # ── 7. CTR確認候補クエリ（参考） ──
+    # ── 10. CTR確認候補クエリ（参考） ──
     md += [
-        "## 8. 参考：CTR確認候補クエリ",
+        "## 10. 参考：CTR確認候補クエリ",
         "",
         "> 掲載順位に対してCTRが低いクエリ一覧。SERP変化・AI Overview影響の可能性があります。断定ではなく次月以降の確認ポイントとしてご参照ください。",
         "",
@@ -926,8 +1006,8 @@ def gen_markdown(data: dict, config: dict) -> str:
     else:
         md.append("AIOシグナル（閾値超え）は検出されませんでした。\n")
 
-    # ── 9. 上位クエリ ──
-    md += [f"## 9. 上位クエリ TOP{top_n}", ""]
+    # ── 11. 上位クエリ ──
+    md += [f"## 11. 上位クエリ TOP{top_n}", ""]
     tq = data["top_queries"]
     if tq:
         md += [
@@ -946,8 +1026,8 @@ def gen_markdown(data: dict, config: dict) -> str:
     else:
         md.append("データなし\n")
 
-    # ── 10. 上位ページ ──
-    md += [f"## 10. 上位ページ TOP{top_n}", ""]
+    # ── 12. 上位ページ ──
+    md += [f"## 12. 上位ページ TOP{top_n}", ""]
     tp_list = data["top_pages"]
     base = site_url.rstrip("/")
     if tp_list:
@@ -968,8 +1048,8 @@ def gen_markdown(data: dict, config: dict) -> str:
     else:
         md.append("データなし\n")
 
-    # ── 11. 次月確認ポイント ──
-    md += ["## 11. 次月確認ポイント・改善推奨", ""]
+    # ── 13. 次月確認ポイント ──
+    md += ["## 13. 次月確認ポイント・改善推奨", ""]
     md.append(gen_insights(data))
     md.append("")
 
@@ -1036,8 +1116,7 @@ def gen_html(data: dict, config: dict) -> str:
             f'<table cellpadding="0" cellspacing="0"><tr>'
             f'<td style="background:{CYAN};width:3px;border-radius:2px;">&nbsp;</td>'
             f'<td style="padding-left:10px;">'
-            f'<div style="color:{MUTED};font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">{esc(num)}</div>'
-            f'<div style="color:{NAVY};font-size:15px;font-weight:700;margin-top:2px;">{esc(title)}</div>'
+            f'<div style="color:{NAVY};font-size:15px;font-weight:700;">{esc(num)}. {esc(title)}</div>'
             f'</td></tr></table></td></tr>'
         )
 
@@ -1448,7 +1527,51 @@ def gen_html(data: dict, config: dict) -> str:
         table_html = wrap_table(hdr, rows_html)
         return title_html + note_row + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
 
+    # ── AIO競合ランキング セクション ──
+    def _aio_competitor_section() -> str:
+        ranking, total_aio = aio_competitor_ranking(data.get("google_aio", []))
+        title_html = sec_title("4", "AIO競合ランキング")
+        label = "今週" if period_type == "weekly" else "今月"
+        subtitle = (
+            f'<tr><td style="padding-bottom:8px;">'
+            f'<p style="color:{MUTED};font-size:12px;margin:0 0 8px;">'
+            f'{label}引用された企業　（観測AIO: {total_aio}件）</p></td></tr>'
+        )
+        if not ranking:
+            return (
+                title_html + subtitle +
+                f'<tr><td style="padding-bottom:16px;">'
+                f'<p style="color:{MUTED};font-size:12px;margin:0;">'
+                f'AIOに引用された企業は検出されませんでした。</p></td></tr>'
+            )
+        hdr = th("企業", "left") + th("AIシェア", "right", "110")
+        rows_html = ""
+        for item in ranking:
+            share_txt = f'{item["count"]}件 ({item["share"]:.0f}%)'
+            is_tcd = item.get("is_tcd", False)
+            name_cell = (
+                f'<span style="color:{NAVY};font-weight:700;">{esc(item["name"])}</span>'
+                if is_tcd else esc(item["name"])
+            )
+            share_color = UP if item["count"] > 0 else MUTED
+            share_cell = f'<span style="color:{share_color};font-weight:700;">{share_txt}</span>'
+            row_style = ' style="background:#f0fdf4;"' if is_tcd else ""
+            rows_html += f'<tr{row_style}>{td_cell(name_cell)}{td_cell(share_cell, "right")}</tr>\n'
+        table_html = wrap_table(hdr, rows_html)
+
+        hypothesis = gen_aio_competitor_hypothesis(ranking, total_aio, label)
+        hypo_html = ""
+        if hypothesis:
+            hypo_html = (
+                f'<tr><td style="padding:10px 0 16px;">'
+                f'<p style="color:{TEXT};font-size:12px;line-height:1.8;margin:0;">{esc(hypothesis)}</p>'
+                f'</td></tr>'
+            )
+
+        return title_html + subtitle + f'<tr><td style="padding-bottom:8px;">{table_html}</td></tr>' + hypo_html
+
     google_aio_html = _google_aio_section()
+    aio_competitor_html = _aio_competitor_section()
 
     kw_table_html  = two_row_table(kw_active,  kw_name)
     svc_table_html = two_row_table(svc_active, page_name)
@@ -1473,7 +1596,7 @@ def gen_html(data: dict, config: dict) -> str:
 
 <table width="100%" cellpadding="0" cellspacing="0" style="background:{BG};padding:32px 12px;">
 <tr><td align="center">
-<table width="680" cellpadding="0" cellspacing="0" style="max-width:680px;width:100%;background:#fff;border-radius:10px;border:1px solid {BORDER};overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.07);">
+<table width="850" cellpadding="0" cellspacing="0" style="max-width:850px;width:100%;background:#fff;border-radius:10px;border:1px solid {BORDER};overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.07);">
 
 <!-- HEADER -->
 <tr><td style="background:{NAVY};padding:36px 40px;">
@@ -1508,38 +1631,41 @@ def gen_html(data: dict, config: dict) -> str:
 <!-- 3. Google AI Overview 観測 -->
 {google_aio_html}
 
-<!-- 4. 重点キーワード監視 -->
-{sec_title("4", "重点キーワード監視")}
+<!-- 4. AIO競合ランキング -->
+{aio_competitor_html}
+
+<!-- 5. 重点キーワード監視 -->
+{sec_title("5", "重点キーワード監視")}
 <tr><td style="padding-bottom:4px;">{kw_table_html}</td></tr>
 {kw_note}
 
-<!-- 5. サービス系 -->
-{sec_title("5", "サービス系")}
+<!-- 6. サービス系 -->
+{sec_title("6", "サービス系")}
 <tr><td style="padding-bottom:4px;">{svc_table_html}</td></tr>
 {svc_note}
 
-<!-- 6. サービスDefinition系 -->
-{sec_title("6", "サービスDefinition系")}
+<!-- 7. サービスDefinition系 -->
+{sec_title("7", "サービスDefinition系")}
 <tr><td style="padding-bottom:4px;">{aio_table_html}</td></tr>
 {aio_note}
 
-<!-- 7. マガジン系 -->
-{sec_title("7", "マガジン系")}
+<!-- 8. マガジン系 -->
+{sec_title("8", "マガジン系")}
 <tr><td style="padding-bottom:4px;">{def_table_html}</td></tr>
 {def_note}
 
-<!-- 8. 重要ページ監視 -->
-{sec_title("8", "重要ページ監視")}
+<!-- 9. 重要ページ監視 -->
+{sec_title("9", "重要ページ監視")}
 <tr><td style="padding-bottom:4px;"><p style="color:{MUTED};font-size:11px;margin:0 0 8px 0;">Search Console上の検索流入評価。実際のCV数ではありません（CV計測は将来GA4で実施）。</p></td></tr>
 <tr><td style="padding-bottom:4px;">{lp_table_html}</td></tr>
 {lp_note}
 
-<!-- 9. 今週/月の仮説 -->
-{sec_title("9", f"今{period_unit}の仮説")}
+<!-- 10. 今週/月の仮説 -->
+{sec_title("10", f"今{period_unit}の仮説")}
 {hypothesis_html}
 
-<!-- 10. 次週/月確認ポイント -->
-{sec_title("10", f"次{period_unit}確認ポイント")}
+<!-- 11. 次週/月確認ポイント -->
+{sec_title("11", f"次{period_unit}確認ポイント")}
 {checkpoints_html}
 
 </table>
