@@ -604,18 +604,26 @@ def aio_competitor_ranking(gaio: list[dict]) -> tuple[list[dict], int]:
         return [], 0
 
     counts: dict[str, int] = {}
+    kw_map: dict[str, list[str]] = {}
     tcd_count = 0
+    tcd_kws: list[str] = []
     for r in gaio:
         if not r.get("aio_exists"):
             continue
+        q = r.get("query", "")
         if r.get("tcd_cited"):
             tcd_count += 1
+            if q and q not in tcd_kws:
+                tcd_kws.append(q)
         for domain in r.get("cited_domains", []):
             if "tcd" not in domain.lower():
                 counts[domain] = counts.get(domain, 0) + 1
+                if q and q not in kw_map.get(domain, []):
+                    kw_map.setdefault(domain, []).append(q)
 
     ranking = sorted(
-        [{"name": k, "count": v, "share": round(v / total_aio * 100, 1)}
+        [{"name": k, "count": v, "share": round(v / total_aio * 100, 1),
+          "keywords": kw_map.get(k, [])}
          for k, v in counts.items()],
         key=lambda x: -x["count"]
     )
@@ -623,6 +631,7 @@ def aio_competitor_ranking(gaio: list[dict]) -> tuple[list[dict], int]:
         "name": "TCD（自社）",
         "count": tcd_count,
         "share": round(tcd_count / total_aio * 100, 1),
+        "keywords": tcd_kws,
         "is_tcd": True,
     })
     return ranking, total_aio
@@ -936,10 +945,11 @@ def gen_markdown(data: dict, config: dict) -> str:
     md.append(f"### {period_label}引用された企業（観測AIO: {total_aio}件）")
     md.append("")
     if ranking:
-        md += ["| 企業 | AIシェア |", "|------|---------|"]
+        md += ["| 企業 | 対象キーワード | AIシェア |", "|------|-------------|---------|"]
         for item in ranking:
+            kw_txt = "、".join(item.get("keywords", [])) or "—"
             share_txt = f'{item["count"]}件 ({item["share"]:.0f}%)'
-            md.append(f"| {item['name']} | {share_txt} |")
+            md.append(f"| {item['name']} | {kw_txt} | {share_txt} |")
         md.append("")
         hypothesis = gen_aio_competitor_hypothesis(ranking, total_aio, period_label)
         if hypothesis:
@@ -1098,7 +1108,7 @@ def gen_html(data: dict, config: dict) -> str:
 
     def chg_span(val: float | None) -> str:
         if val is None:
-            return f'<span style="color:{MUTED};font-size:11px;">NEW</span>'
+            return f'<span style="color:{MUTED};font-size:14px;">NEW</span>'
         color  = UP if val > 1 else (DOWN if val < -1 else MUTED)
         prefix = "+" if val > 0 else ""
         return f'<span style="color:{color};font-weight:700;">{prefix}{val:.1f}%</span>'
@@ -1116,7 +1126,7 @@ def gen_html(data: dict, config: dict) -> str:
             f'<table cellpadding="0" cellspacing="0"><tr>'
             f'<td style="background:{CYAN};width:3px;border-radius:2px;">&nbsp;</td>'
             f'<td style="padding-left:10px;">'
-            f'<div style="color:{NAVY};font-size:15px;font-weight:700;">{esc(num)}. {esc(title)}</div>'
+            f'<div style="color:{NAVY};font-size:19px;font-weight:700;">{esc(num)}. {esc(title)}</div>'
             f'</td></tr></table></td></tr>'
         )
 
@@ -1124,40 +1134,40 @@ def gen_html(data: dict, config: dict) -> str:
         return (
             f'<tr><td style="padding-bottom:16px;">'
             f'<div style="background:{INFO_BG};border-left:4px solid {CYAN};border-radius:0 6px 6px 0;'
-            f'padding:16px 20px;color:{TEXT};font-size:14px;line-height:1.8;">{html}</div></td></tr>'
+            f'padding:16px 20px;color:{TEXT};font-size:18px;line-height:1.8;">{html}</div></td></tr>'
         )
 
     def finding_row(text: str) -> str:
         return (
             f'<tr><td style="padding-bottom:8px;">'
             f'<div style="background:{INFO_BG};border-left:4px solid {CYAN};border-radius:0 5px 5px 0;'
-            f'padding:11px 16px;color:{TEXT};font-size:13px;line-height:1.6;">&#128269; {esc(text)}</div></td></tr>'
+            f'padding:11px 16px;color:{TEXT};font-size:16px;line-height:1.6;">&#128269; {esc(text)}</div></td></tr>'
         )
 
     def hypothesis_row(text: str) -> str:
         return (
             f'<tr><td style="padding-bottom:8px;">'
             f'<div style="background:{HYPO_BG};border-left:4px solid #cbd5e1;border-radius:0 5px 5px 0;'
-            f'padding:11px 16px;color:{TEXT};font-size:13px;line-height:1.6;">&#128270; {esc(text)}</div></td></tr>'
+            f'padding:11px 16px;color:{TEXT};font-size:16px;line-height:1.6;">&#128270; {esc(text)}</div></td></tr>'
         )
 
     def check_row(text: str) -> str:
         return (
             f'<tr><td style="padding-bottom:8px;">'
             f'<div style="padding:4px 0 4px 12px;border-left:3px solid {BORDER};'
-            f'color:{TEXT};font-size:13px;line-height:1.6;">&#8250; {esc(text)}</div></td></tr>'
+            f'color:{TEXT};font-size:16px;line-height:1.6;">&#8250; {esc(text)}</div></td></tr>'
         )
 
     def th(label: str, align: str = "left", w: str = "") -> str:
         ws = f' width="{w}"' if w else ""
         return (
-            f'<th{ws} style="background:{NAVY};color:#fff;font-size:11px;font-weight:600;'
+            f'<th{ws} style="background:{NAVY};color:#fff;font-size:14px;font-weight:600;'
             f'padding:8px 10px;text-align:{align};white-space:nowrap;letter-spacing:.3px;">{esc(label)}</th>'
         )
 
     def td_cell(content: str, align: str = "left") -> str:
         return (
-            f'<td style="padding:7px 10px;font-size:12px;color:{TEXT};'
+            f'<td style="padding:7px 10px;font-size:15px;color:{TEXT};'
             f'text-align:{align};border-bottom:1px solid {BORDER};vertical-align:middle;">{content}</td>'
         )
 
@@ -1179,7 +1189,7 @@ def gen_html(data: dict, config: dict) -> str:
             return ""
         return (
             f'<tr><td style="padding:2px 0 10px;">'
-            f'<p style="color:{MUTED};font-size:11px;margin:0;">'
+            f'<p style="color:{MUTED};font-size:14px;margin:0;">'
             f'※ {total}{unit}中 {total - hidden}{unit}を表示（Imp=0の{hidden}{unit}は省略）</p>'
             f'</td></tr>'
         )
@@ -1212,7 +1222,7 @@ def gen_html(data: dict, config: dict) -> str:
             has_cur = cd["impressions"] > 0
 
             rows += (
-                f'<tr><td colspan="{col_count}" style="padding:9px 12px;font-size:13px;'
+                f'<tr><td colspan="{col_count}" style="padding:9px 12px;font-size:16px;'
                 f'font-weight:700;border-bottom:1px solid {BORDER};color:{NAVY};">'
                 f'{name_fn(r)}</td></tr>\n'
             )
@@ -1227,7 +1237,7 @@ def gen_html(data: dict, config: dict) -> str:
             )
             if has_global_prev:
                 has_prev  = r["prv"]["impressions"] > 0
-                ref_span  = f'<span style="color:{MUTED};font-size:11px;">参考値</span>'
+                ref_span  = f'<span style="color:{MUTED};font-size:14px;">参考値</span>'
 
                 # クリック前月比: 前期クリック < 3 は参考値
                 cl_cell = td_cell(
@@ -1236,7 +1246,7 @@ def gen_html(data: dict, config: dict) -> str:
                 )
                 # 順位変化: 前期なし → 比較対象なし / 現期Imp < 30 → 参考値
                 if not has_prev:
-                    pos_cell = td_cell(f'<span style="color:{MUTED};font-size:11px;">比較対象なし</span>', "right")
+                    pos_cell = td_cell(f'<span style="color:{MUTED};font-size:14px;">比較対象なし</span>', "right")
                 elif cd["impressions"] < MIN_IMP_FINDING:
                     pos_cell = td_cell(ref_span, "right")
                 else:
@@ -1370,6 +1380,48 @@ def gen_html(data: dict, config: dict) -> str:
             hypos.append("観察対象となる数値変化は次月以降に整理する。現時点では初期値として記録する。")
         return hypos[:5]
 
+    # ── AIO対策サジェスション ──
+    def gen_aio_suggestions() -> list[str]:
+        gaio = data.get("google_aio", [])
+        ranking, total_aio = aio_competitor_ranking(gaio)
+        suggestions = []
+
+        # S1: AIOに表示されているがTCDが未引用のクエリへの対策
+        missed = [r["query"] for r in gaio if r.get("aio_exists") and not r.get("tcd_cited") and r.get("query")]
+        if missed:
+            q_txt = "・".join(f'「{q}」' for q in missed[:3])
+            suggestions.append(
+                f"{q_txt} でAIOが表示されているがTCDは未引用。"
+                "各クエリに対応した「定義→選び方→比較表」形式の長文コンテンツを整備し、引用獲得を狙う。"
+            )
+        else:
+            suggestions.append(
+                "観測クエリ全件でAIO引用を獲得中。"
+                "引用箇所の質と網羅性を高め、さらに多くのクエリへ展開していく。"
+            )
+
+        # S2: 競合ドメインが使うコンテンツ形式への追随
+        competitors = [r for r in ranking if not r.get("is_tcd") and r["count"] > 0]
+        if competitors:
+            top = competitors[0]
+            suggestions.append(
+                f'{top["name"]} など競合はAIO引用を複数獲得。'
+                "同様の「ブランディング会社比較・一覧」型ページを作成し、Googleが一度の検索で解決できるコンテンツを提供する。"
+            )
+        else:
+            suggestions.append(
+                "競合のAIO引用実績が少ないうちに先行して「比較・一覧型コンテンツ」を整備し、"
+                "AIOの引用元として優位ポジションを確立する。"
+            )
+
+        # S3: 構造化データ・技術施策
+        suggestions.append(
+            "主要サービスページにFAQスキーマ・HowToスキーマなどの構造化データを実装し、"
+            "AIへの情報提供を最適化することでAIO引用率の向上を図る。"
+        )
+
+        return suggestions
+
     # ── 次月確認ポイント ──
     def gen_html_checkpoints() -> list[str]:
         checks = []
@@ -1444,9 +1496,10 @@ def gen_html(data: dict, config: dict) -> str:
         title = esc(r.get("title") or r["name"])
         return f'<a href="{esc(r["url"])}" style="color:{NAVY};text-decoration:none;">{title}</a>'
 
-    findings_html    = "".join(finding_row(f)    for f in gen_findings())
-    hypothesis_html  = "".join(hypothesis_row(h) for h in gen_hypothesis())
-    checkpoints_html = "".join(check_row(c)      for c in gen_html_checkpoints())
+    findings_html      = "".join(finding_row(f)    for f in gen_findings())
+    hypothesis_html    = "".join(hypothesis_row(h) for h in gen_hypothesis())
+    checkpoints_html   = "".join(check_row(c)      for c in gen_html_checkpoints())
+    aio_suggestions_html = "".join(check_row(s)    for s in gen_aio_suggestions())
 
     # ── Google AI Overview セクション（SerpAPI）──
     def _google_aio_section() -> str:
@@ -1454,7 +1507,7 @@ def gen_html(data: dict, config: dict) -> str:
         title_html = sec_title("3", "Google AI Overview 観測")
         note_row = (
             f'<tr><td style="padding-bottom:8px;">'
-            f'<p style="color:{MUTED};font-size:11px;margin:0;">'
+            f'<p style="color:{MUTED};font-size:14px;margin:0;">'
             f'SerpAPI 経由で Google 検索上の AI Overview（AIによる概要）を観測しています。'
             f'取得失敗はAIOなしとは区別します。'
             f'</p></td></tr>'
@@ -1464,7 +1517,7 @@ def gen_html(data: dict, config: dict) -> str:
             return (
                 title_html + note_row +
                 f'<tr><td style="padding-bottom:16px;">'
-                f'<p style="color:{MUTED};font-size:12px;margin:0;">'
+                f'<p style="color:{MUTED};font-size:15px;margin:0;">'
                 f'観測データなし（SERPAPI_API_KEY 未設定または無効）。</p></td></tr>'
             )
 
@@ -1492,9 +1545,9 @@ def gen_html(data: dict, config: dict) -> str:
 
             urls = r.get("cited_urls", [])
             url_html = "<br>".join(
-                f'<a href="{esc(u)}" style="color:{CYAN};font-size:11px;text-decoration:none;">{esc(_extract_domain(u))}</a>'
+                f'<a href="{esc(u)}" style="color:{CYAN};font-size:14px;text-decoration:none;">{esc(_extract_domain(u))}</a>'
                 for u in urls[:3]
-            ) or f'<span style="color:{MUTED};font-size:11px;">-</span>'
+            ) or f'<span style="color:{MUTED};font-size:14px;">-</span>'
 
             comp = "・".join(esc(d) for d in r.get("competitor_domains", [])[:3]) or "-"
 
@@ -1504,23 +1557,23 @@ def gen_html(data: dict, config: dict) -> str:
                 + td_cell(f'<span style="color:{s_color};font-weight:700;">{s_label}</span>', "center")
                 + td_cell(f'<span style="color:{tcd_color};font-weight:700;">{tcd_txt}</span>', "center")
                 + td_cell(url_html)
-                + td_cell(f'<span style="font-size:12px;">{comp}</span>')
+                + td_cell(f'<span style="font-size:15px;">{comp}</span>')
                 + "</tr>\n"
             )
             if tcd_cited and r.get("tcd_cited_urls"):
                 tcd_url_html = "・".join(
-                    f'<a href="{esc(u)}" style="color:{UP};font-size:11px;">{esc(_extract_domain(u))}</a>'
+                    f'<a href="{esc(u)}" style="color:{UP};font-size:14px;">{esc(_extract_domain(u))}</a>'
                     for u in r["tcd_cited_urls"][:2]
                 )
                 rows_html += (
                     f'<tr style="background:#f0fdf4;"><td colspan="5" '
-                    f'style="padding:5px 10px 7px;font-size:11px;color:{UP};">'
+                    f'style="padding:5px 10px 7px;font-size:14px;color:{UP};">'
                     f'&#9989; TCD引用URL: {tcd_url_html}</td></tr>\n'
                 )
             elif r.get("aio_text") and r.get("aio_exists"):
                 rows_html += (
                     f'<tr style="background:#f8fafc;"><td colspan="5" '
-                    f'style="padding:5px 10px 7px;font-size:11px;color:{MUTED};">'
+                    f'style="padding:5px 10px 7px;font-size:14px;color:{MUTED};">'
                     f'&#128203; AIO抜粋: {esc((r["aio_text"] or "")[:120])}…</td></tr>\n'
                 )
 
@@ -1534,19 +1587,20 @@ def gen_html(data: dict, config: dict) -> str:
         label = "今週" if period_type == "weekly" else "今月"
         subtitle = (
             f'<tr><td style="padding-bottom:8px;">'
-            f'<p style="color:{MUTED};font-size:12px;margin:0 0 8px;">'
+            f'<p style="color:{MUTED};font-size:15px;margin:0 0 8px;">'
             f'{label}引用された企業　（観測AIO: {total_aio}件）</p></td></tr>'
         )
         if not ranking:
             return (
                 title_html + subtitle +
                 f'<tr><td style="padding-bottom:16px;">'
-                f'<p style="color:{MUTED};font-size:12px;margin:0;">'
+                f'<p style="color:{MUTED};font-size:15px;margin:0;">'
                 f'AIOに引用された企業は検出されませんでした。</p></td></tr>'
             )
-        hdr = th("企業", "left") + th("AIシェア", "right", "110")
+        hdr = th("企業", "left") + th("対象キーワード", "left") + th("AIシェア", "right", "110")
         rows_html = ""
         for item in ranking:
+            kw_txt = "、".join(item.get("keywords", [])) or "—"
             share_txt = f'{item["count"]}件 ({item["share"]:.0f}%)'
             is_tcd = item.get("is_tcd", False)
             name_cell = (
@@ -1556,7 +1610,7 @@ def gen_html(data: dict, config: dict) -> str:
             share_color = UP if item["count"] > 0 else MUTED
             share_cell = f'<span style="color:{share_color};font-weight:700;">{share_txt}</span>'
             row_style = ' style="background:#f0fdf4;"' if is_tcd else ""
-            rows_html += f'<tr{row_style}>{td_cell(name_cell)}{td_cell(share_cell, "right")}</tr>\n'
+            rows_html += f'<tr{row_style}>{td_cell(name_cell)}{td_cell(esc(kw_txt))}{td_cell(share_cell, "right")}</tr>\n'
         table_html = wrap_table(hdr, rows_html)
 
         hypothesis = gen_aio_competitor_hypothesis(ranking, total_aio, label)
@@ -1564,7 +1618,7 @@ def gen_html(data: dict, config: dict) -> str:
         if hypothesis:
             hypo_html = (
                 f'<tr><td style="padding:10px 0 16px;">'
-                f'<p style="color:{TEXT};font-size:12px;line-height:1.8;margin:0;">{esc(hypothesis)}</p>'
+                f'<p style="color:{TEXT};font-size:15px;line-height:1.8;margin:0;">{esc(hypothesis)}</p>'
                 f'</td></tr>'
             )
 
@@ -1600,16 +1654,16 @@ def gen_html(data: dict, config: dict) -> str:
 
 <!-- HEADER -->
 <tr><td style="background:{NAVY};padding:36px 40px;">
-  <div style="color:{CYAN};font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin-bottom:14px;">{header_label}</div>
-  <h1 style="color:#fff;font-size:21px;font-weight:700;margin:0 0 18px;line-height:1.35;letter-spacing:-.3px;">{report_title}</h1>
+  <div style="color:{CYAN};font-size:13px;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin-bottom:14px;">{header_label}</div>
+  <h1 style="color:#fff;font-size:26px;font-weight:700;margin:0 0 18px;line-height:1.35;letter-spacing:-.3px;">{report_title}</h1>
   <table cellpadding="0" cellspacing="0"><tr>
     <td style="padding-right:28px;">
-      <div style="color:{CYAN};font-size:10px;font-weight:700;letter-spacing:1px;margin-bottom:4px;">{cur_label}</div>
-      <div style="color:#cbd5e1;font-size:12px;">{cs} 〜 {ce}</div>
+      <div style="color:{CYAN};font-size:13px;font-weight:700;letter-spacing:1px;margin-bottom:4px;">{cur_label}</div>
+      <div style="color:#cbd5e1;font-size:15px;">{cs} 〜 {ce}</div>
     </td>
     <td>
-      <div style="color:#64748b;font-size:10px;font-weight:700;letter-spacing:1px;margin-bottom:4px;">{prv_label}</div>
-      <div style="color:#64748b;font-size:12px;">{ps} 〜 {pe}</div>
+      <div style="color:#64748b;font-size:13px;font-weight:700;letter-spacing:1px;margin-bottom:4px;">{prv_label}</div>
+      <div style="color:#64748b;font-size:15px;">{ps} 〜 {pe}</div>
     </td>
   </tr></table>
 </td></tr>
@@ -1620,7 +1674,7 @@ def gen_html(data: dict, config: dict) -> str:
 
 <!-- 1. 総評 -->
 <tr><td style="padding-top:32px;padding-bottom:4px;">
-  <div style="color:{NAVY};font-size:15px;font-weight:700;margin-bottom:10px;">1. 総評</div>
+  <div style="color:{NAVY};font-size:19px;font-weight:700;margin-bottom:10px;">1. 総評</div>
 </td></tr>
 {info_box(summary_html())}
 
@@ -1656,7 +1710,7 @@ def gen_html(data: dict, config: dict) -> str:
 
 <!-- 9. 重要ページ監視 -->
 {sec_title("9", "重要ページ監視")}
-<tr><td style="padding-bottom:4px;"><p style="color:{MUTED};font-size:11px;margin:0 0 8px 0;">Search Console上の検索流入評価。実際のCV数ではありません（CV計測は将来GA4で実施）。</p></td></tr>
+<tr><td style="padding-bottom:4px;"><p style="color:{MUTED};font-size:14px;margin:0 0 8px 0;">Search Console上の検索流入評価。実際のCV数ではありません（CV計測は将来GA4で実施）。</p></td></tr>
 <tr><td style="padding-bottom:4px;">{lp_table_html}</td></tr>
 {lp_note}
 
@@ -1664,8 +1718,12 @@ def gen_html(data: dict, config: dict) -> str:
 {sec_title("10", f"今{period_unit}の仮説")}
 {hypothesis_html}
 
-<!-- 11. 次週/月確認ポイント -->
-{sec_title("11", f"次{period_unit}確認ポイント")}
+<!-- 11. AIO対策サジェスション -->
+{sec_title("11", "AIO対策サジェスション")}
+{aio_suggestions_html}
+
+<!-- 12. 次週/月確認ポイント -->
+{sec_title("12", f"次{period_unit}確認ポイント")}
 {checkpoints_html}
 
 </table>
@@ -1675,14 +1733,14 @@ def gen_html(data: dict, config: dict) -> str:
 <tr><td style="padding:40px 40px;text-align:center;border-top:1px solid {BORDER};">
   <a href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a"
      style="display:inline-block;padding:9px 24px;background:{NAVY};color:#fff;
-            font-size:13px;font-weight:600;text-decoration:none;border-radius:5px;letter-spacing:.3px;">
+            font-size:16px;font-weight:600;text-decoration:none;border-radius:5px;letter-spacing:.3px;">
     Data Studio で確認する →
   </a>
 </td></tr>
 
 <!-- FOOTER -->
 <tr><td style="background:{BG};border-top:1px solid {BORDER};padding:18px 40px;text-align:center;">
-  <p style="color:{MUTED};font-size:11px;margin:0;line-height:1.7;">
+  <p style="color:{MUTED};font-size:14px;margin:0;line-height:1.7;">
     Generated by TCD SEO / AIO Monitor<br>生成日時: {generated_at}
   </p>
 </td></tr>
