@@ -1732,8 +1732,8 @@ def gen_html(data: dict, config: dict) -> str:
 <!-- Data Studio リンク -->
 <tr><td style="padding:40px 40px;text-align:center;border-top:1px solid {BORDER};">
   <a href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a"
-     style="display:inline-block;padding:9px 24px;background:{NAVY};color:#fff;
-            font-size:16px;font-weight:600;text-decoration:none;border-radius:5px;letter-spacing:.3px;">
+     style="display:inline-block;padding:18px 24px;background:{NAVY};color:#fff;
+            font-size:21px;font-weight:600;text-decoration:none;border-radius:5px;letter-spacing:.3px;">
     Data Studio で確認する →
   </a>
 </td></tr>
