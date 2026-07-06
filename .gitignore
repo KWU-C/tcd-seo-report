@@ -13,6 +13,9 @@ preview.html
 # 生成レポート（任意でコミット対象にしたい場合はコメントアウト）
 reports/
 
+# AIO日次モニター実行ログ（各端末で生成されるためコミット対象外）
+logs/
+
 # Python
 __pycache__/
 *.pyc

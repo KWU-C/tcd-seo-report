@@ -1,0 +1,9 @@
+date,query,aio_exists,tcd_cited,tcd_mentioned,aio_text_hash,aio_text_changed,status
+2026-07-06,インナーブランディング 会社,True,False,False,070811c97cb9b24d,True,OK_WITH_AIO
+2026-07-06,インナーブランディング 会社 大阪,True,False,False,,False,OK_WITH_AIO
+2026-07-06,インナーブランディング 会社 東京,True,False,False,c0cb091c735e2570,True,OK_WITH_AIO
+2026-07-06,インナーブランディングとは,True,False,False,4f6ced3415fbaeca,True,OK_WITH_AIO
+2026-07-06,ブランディング 会社,True,False,False,fe75709d6f1c4d50,True,OK_WITH_AIO
+2026-07-06,ブランディング 会社 大阪,True,False,False,12aeef0ad7dec343,True,OK_WITH_AIO
+2026-07-06,ブランディング 会社 東京,False,False,False,,False,OK_NO_AIO
+2026-07-06,ブランディングとは,True,False,False,36bcfc795a61e32c,True,OK_WITH_AIO
