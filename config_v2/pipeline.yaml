@@ -1,0 +1,30 @@
+# パイプライン実行設定（対象期間の決定・GA4セグメント定義）
+#
+# コードに固定値を埋め込まず、本ファイルを参照する（thresholds.yamlと同じ方針）。
+
+gsc:
+  data_cutoff:
+    # fixed: レポート生成日から offset_days 日を引いた日を「確定日」とみなす。
+    # Search Consoleは通常2〜3日の遅延があるため、未確定期間をレポート対象から除外する。
+    # auto（GSC APIで実データを確認して動的判定）はv3以降の拡張ポイント。今回はfixedのみ実装。
+    mode: fixed
+    offset_days: 3
+  report_period:
+    length_days: 7
+  compare_period: previous_7_days
+
+ga4:
+  property_id: "269009748"
+  segments:
+    - key: site_wide
+      label: サイト全体
+      path_contains: null
+    - key: magazine
+      label: マガジン到達
+      path_contains: "/branding/"
+    - key: works
+      label: Works到達
+      path_contains: "/works/"
+    - key: service
+      label: Service到達
+      path_contains: "/service/"

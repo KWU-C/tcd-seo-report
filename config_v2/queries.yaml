@@ -1,0 +1,123 @@
+# 重点市場クエリ定義
+#
+# 【方針転換】完全一致（exact）による集計は廃止した。
+# 理由: 「東京 インナーブランディング会社」「インナーブランディング会社 東京」
+# 「東京のインナーブランディング会社」等、語順・表記の揺れがGoogle上では
+# すべて別クエリとして扱われ、完全一致だけでは実際の検索需要を大きく取りこぼす
+# （2026-07-27、Looker Studio上の数値との突合で判明）。
+#
+# 現在の唯一の正: markets 配下の all（トークンAND一致、順序不問）。
+# GSCの生クエリ文字列を正規化した上で、all に列挙した語をすべて含むかどうかで判定する
+# （Pythonでいう `all(token in normalize(query) for token in tokens)` と同義）。
+# 語順は自由。「インナーブランディング 支援」のように一部の語しか含まないクエリは
+# 対象外になる（AND条件のため）。
+#
+# Looker Studioは今後、過去データとの比較参照専用とし、集計の正本にはしない
+# （Looker側フィルタの正規表現はRE2でlookaheadが使えず、AND条件の再現に別途
+# 保守コストがかかるため。v2のPython実装を唯一の正とする）。
+#
+# query: AIO観測（SerpAPIへの実際の検索文字列）・レポート表示用の代表クエリ。
+#        GSCマッチングには使わない（all のみを使う）。
+markets:
+  branding_tokyo:
+    query: "ブランディング 会社 東京"
+    market: branding
+    region: tokyo
+    all:
+      - ブランディング
+      - 会社
+      - 東京
+  branding_osaka:
+    query: "ブランディング 会社 大阪"
+    market: branding
+    region: osaka
+    all:
+      - ブランディング
+      - 会社
+      - 大阪
+  inner_tokyo:
+    query: "インナーブランディング 会社 東京"
+    market: inner_branding
+    region: tokyo
+    all:
+      - インナーブランディング
+      - 会社
+      - 東京
+  inner_osaka:
+    query: "インナーブランディング 会社 大阪"
+    market: inner_branding
+    region: osaka
+    all:
+      - インナーブランディング
+      - 会社
+      - 大阪
+
+# 補助的な市場把握用クエリ（地域を限定しない上位語）。
+# レポート冒頭の市場サマリー表示に使う参考値であり、施策判断の主対象にはしない。
+# （現状コードから未参照。将来の市場サマリー拡張用に定義のみ保持）
+supplementary_market_queries:
+  - query: "ブランディング 会社"
+    market: branding
+    region: null
+  - query: "インナーブランディング 会社"
+    market: inner_branding
+    region: null
+
+# GSC上の実クエリ文字列を markets.*.all と照合する際のルール。
+query_matching:
+  normalize:
+    - 半角スペース・全角スペース・スペースなしのバリアントは、比較前にスペースを除去して正規化する（NFKC正規化も行う）
+  all_tokens_match:
+    rule: "all(normalize(token) in normalize(gsc_query) for token in market.all)"
+    note: >-
+      語順は問わない。一致した実クエリの内訳（matched_query_variants）は
+      Findingのevidenceに保持し、どの生クエリが集計に寄与したか常に追跡できるようにする
+      （2026-07-27の突合作業で「集計結果がどのクエリ由来か分からない」問題が実際に
+      発生したため、透明性を必須要件とする）。
+
+# ページ単体クエリ分析（地域ページ・比較文脈の判定）に使う分類語。
+# config/aio_monitor.yml の page_query_watch.classification を継承。
+# config_v2/pages.yaml の objective: [regional, comparison]（大阪ページ）の判定根拠と整合させる。
+query_classification:
+  regional_terms: ["大阪", "関西"]
+  comparison_terms: ["比較", "選び方", "違い", "おすすめ", "大手", "実績", "どちら", "どこ", "会社"]
+  natural_language_min_length: 20
+
+# AIO競合ドメインの正規化・エンティティ分類。
+# config/aio_monitor.yml の domain_aliases / domain_entity_types をそのまま継承。
+competitor_domains:
+  aliases:
+    paddledesign.co.jp:
+      - "paddledesign.co.jp"
+      - "パドルデザインカンパニー"
+      - "株式会社パドルデザインカンパニー"
+      - "Paddle Design"
+    zeroin.co.jp:
+      - "zeroin.co.jp"
+      - "株式会社ゼロイン"
+    shanon.co.jp:
+      - "shanon.co.jp"
+      - "株式会社シャノン"
+    prdx.co.jp:
+      - "prdx.co.jp"
+      - "株式会社パラドックス"
+    ageha.tv:
+      - "ageha.tv"
+      - "株式会社揚羽"
+      - "株式会社揚羽（AGEHA Inc.）"
+      - "AGEHA Inc."
+    irischitose.co.jp:
+      - "irischitose.co.jp"
+      - "アイリスチトセ株式会社"
+  entity_types:
+    tcd.jp: branding_company
+    paddledesign.co.jp: branding_company
+    prdx.co.jp: branding_company
+    ageha.tv: branding_company
+    zeroin.co.jp: consulting_company
+    smbc.co.jp: financial_institution
+    mirasapo-plus.go.jp: public_institution
+    prtimes.com: media
+  # 未登録ドメインは unknown（AIO参考情報源として扱う。新規競合の見落としを防ぐため
+  # 「未分類のまま除外」はしない）
+  unknown_domain_entity_type: unknown

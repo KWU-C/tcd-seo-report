@@ -1,0 +1,301 @@
+"""正規化層。
+
+URLの正規化は本モジュールでのみ行う（fetch層・validate層では行わない）。
+AIO引用ドメインの正規化（alias解決・エンティティ分類）も、raw観測結果の
+解釈にあたるためここで行う（raw層には解釈済みの値を置かない）。
+
+入力: raw（GSC rows / AIO observation record）
+出力: data-contract.md 4節に定義したprocessedテーブル（プレーンなlist[dict]）
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+import unicodedata
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode, unquote
+
+# ────────────────────────────────────────────────────────────────────
+# URL正規化（このモジュールが唯一の実装場所）
+# ────────────────────────────────────────────────────────────────────
+
+_NOISE_QUERY_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "yclid", "ref",
+}
+_EXCLUDE_PATH_MARKERS = ("/wp-admin", "/wp-login")
+_EXCLUDE_QUERY_MARKERS = ("customize_changeset_uuid", "preview")
+
+
+def normalize_url(raw_url: str) -> dict:
+    """URLを正規化する。data-contract.md 3節の契約に従う。
+
+    - http -> https
+    - hostの大文字小文字統一
+    - URLエンコード表現の統一（一度decodeしてから再構成）
+    - 末尾の index.html を "/" に統一（ディレクトリ形式のみ。.htmlファイルURLはそのまま）
+    - 不要クエリパラメータ（utm_*等）の除去
+    - preview/customize/wp-admin系はis_excluded=Trueにする（正規化はするが監視対象外として扱う）
+
+    canonical_url はHTTP応答の確認が必要なため、本関数では判定しない
+    （未確認はnull。推測でcanonical_urlを埋めない）。
+    ハイフン/アンダースコアの統一はしない（別URLとして扱う。要件通り）。
+    """
+    parts = urlsplit(raw_url.strip())
+    scheme = "https"
+    netloc = parts.netloc.lower()
+
+    path = unquote(parts.path)
+    if path.endswith("/index.html"):
+        path = path[: -len("index.html")]
+
+    query_pairs = [
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k not in _NOISE_QUERY_PARAMS
+    ]
+
+    is_excluded = False
+    exclusion_reason = None
+    if any(marker in path for marker in _EXCLUDE_PATH_MARKERS):
+        is_excluded = True
+        exclusion_reason = "wp-admin/wp-login系パス"
+    elif any(k for k, _ in parse_qsl(parts.query, keep_blank_values=True) if any(m in k for m in _EXCLUDE_QUERY_MARKERS)):
+        is_excluded = True
+        exclusion_reason = "preview/customize系クエリパラメータ"
+
+    normalized_url = urlunsplit((scheme, netloc, path, urlencode(query_pairs), ""))
+
+    return {
+        "normalized_url": normalized_url,
+        "canonical_url": None,
+        "is_excluded": is_excluded,
+        "exclusion_reason": exclusion_reason,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────
+# クエリ正規化・重点クエリ照合（config_v2/queries.yaml の query_matching に対応）
+# ────────────────────────────────────────────────────────────────────
+
+def _strip_all_spaces(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s)
+    return re.sub(r"\s+", "", s)
+
+
+def normalize_query_text(raw_query: str) -> str:
+    """半角/全角スペース・スペースなしのバリアントを比較できるよう正規化する。"""
+    return _strip_all_spaces(raw_query)
+
+
+def matches_all_tokens(gsc_query: str, tokens: list[str]) -> bool:
+    """gsc_query が tokens をすべて（順序不問で）含むかを判定する。
+
+    完全一致ではなくAND条件を正とする（2026-07-27の方針転換。queries.yaml
+    markets.*.all を参照）。「東京 インナーブランディング会社」
+    「インナーブランディング会社 東京」「東京のインナーブランディング会社」等、
+    Google上で語順・表記が揺れる自然な検索をすべて拾うため。
+    一部のtokenしか含まないクエリ（例:「インナーブランディング 支援」）は
+    対象外になる。
+    """
+    normalized_gsc = normalize_query_text(gsc_query)
+    return bool(tokens) and all(normalize_query_text(tok) in normalized_gsc for tok in tokens)
+
+
+# ────────────────────────────────────────────────────────────────────
+# GSC processedテーブル生成（data-contract.md 4.1）
+# ────────────────────────────────────────────────────────────────────
+
+def _row_values(row: dict, dimensions: list[str]) -> dict:
+    keys = row.get("keys", [])
+    return dict(zip(dimensions, keys))
+
+
+def build_page_lookup(pages: list[dict]) -> dict[str, str]:
+    """pages.yaml由来のURLを正規化した上で normalized_url -> page_id の辞書を作る。"""
+    lookup: dict[str, str] = {}
+    for page in pages:
+        normalized = normalize_url(page["url"])["normalized_url"]
+        lookup[normalized] = page["id"]
+    return lookup
+
+
+def build_query_daily(raw_date_query: dict, source_fetched_at: str) -> list[dict]:
+    dimensions = raw_date_query["dimensions"]
+    rows = raw_date_query["response"]["rows"]
+    out = []
+    for row in rows:
+        values = _row_values(row, dimensions)
+        out.append({
+            "date": values["date"],
+            "query": values["query"],
+            "normalized_query": normalize_query_text(values["query"]),
+            "clicks": int(row.get("clicks", 0)),
+            "impressions": int(row.get("impressions", 0)),
+            "ctr": float(row.get("ctr", 0.0)),
+            "position": float(row.get("position", 0.0)),
+            "source_fetched_at": source_fetched_at,
+        })
+    return out
+
+
+def build_page_daily(raw_date_page: dict, page_lookup: dict[str, str], source_fetched_at: str) -> list[dict]:
+    dimensions = raw_date_page["dimensions"]
+    rows = raw_date_page["response"]["rows"]
+    out = []
+    for row in rows:
+        values = _row_values(row, dimensions)
+        normalized = normalize_url(values["page"])["normalized_url"]
+        out.append({
+            "date": values["date"],
+            "page_url": values["page"],
+            "normalized_url": normalized,
+            "page_id": page_lookup.get(normalized),
+            "clicks": int(row.get("clicks", 0)),
+            "impressions": int(row.get("impressions", 0)),
+            "ctr": float(row.get("ctr", 0.0)),
+            "position": float(row.get("position", 0.0)),
+            "source_fetched_at": source_fetched_at,
+        })
+    return out
+
+
+def build_page_query_daily(raw_date_page_query: dict, page_lookup: dict[str, str], source_fetched_at: str) -> list[dict]:
+    dimensions = raw_date_page_query["dimensions"]
+    rows = raw_date_page_query["response"]["rows"]
+    out = []
+    for row in rows:
+        values = _row_values(row, dimensions)
+        normalized = normalize_url(values["page"])["normalized_url"]
+        out.append({
+            "date": values["date"],
+            "page_url": values["page"],
+            "normalized_url": normalized,
+            "page_id": page_lookup.get(normalized),
+            "query": values["query"],
+            "clicks": int(row.get("clicks", 0)),
+            "impressions": int(row.get("impressions", 0)),
+            "ctr": float(row.get("ctr", 0.0)),
+            "position": float(row.get("position", 0.0)),
+            "source_fetched_at": source_fetched_at,
+        })
+    return out
+
+
+def build_gsc_processed_tables(raw_by_dimension: dict[str, dict], pages: list[dict]) -> dict[str, list[dict]]:
+    page_lookup = build_page_lookup(pages)
+    return {
+        "gsc_query_daily": build_query_daily(
+            raw_by_dimension["date_query"], raw_by_dimension["date_query"]["fetched_at"]
+        ),
+        "gsc_page_daily": build_page_daily(
+            raw_by_dimension["date_page"], page_lookup, raw_by_dimension["date_page"]["fetched_at"]
+        ),
+        "gsc_page_query_daily": build_page_query_daily(
+            raw_by_dimension["date_page_query"], page_lookup, raw_by_dimension["date_page_query"]["fetched_at"]
+        ),
+    }
+
+
+# ────────────────────────────────────────────────────────────────────
+# AIO processedテーブル生成（data-contract.md 4.2）
+# ────────────────────────────────────────────────────────────────────
+
+_TCD_PATTERNS = ["tcd.jp", "株式会社tcd", " tcd ", "（tcd）"]
+_DOMAIN_RE = re.compile(r"https?://([^/]+)")
+
+
+def _extract_root_domain(url: str) -> str:
+    m = _DOMAIN_RE.search(url or "")
+    host = (m.group(1) if m else "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _build_alias_lookup(competitor_domains_cfg: dict) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for canonical, aliases in (competitor_domains_cfg or {}).get("aliases", {}).items():
+        lookup[_strip_all_spaces(canonical.lower())] = canonical
+        for alias in aliases:
+            lookup[_strip_all_spaces(alias.lower())] = canonical
+    return lookup
+
+
+def _resolve_domain(raw_domain_or_name: str, alias_lookup: dict[str, str]) -> str:
+    if not raw_domain_or_name:
+        return ""
+    key = _strip_all_spaces(raw_domain_or_name.lower())
+    return alias_lookup.get(key, raw_domain_or_name)
+
+
+def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = None) -> dict:
+    """AIO raw record（fetch_aio.pyの出力）を data-contract.md 4.2 の
+    aio_observation スキーマへ変換する。ドメイン抽出・alias正規化・TCD引用判定は
+    ここで初めて行う（rawには含めない）。
+    """
+    status = record["acquisition_status"]
+    alias_lookup = _build_alias_lookup(competitor_domains_cfg or {})
+
+    aio_generated: bool | None
+    tcd_cited: bool | None
+    tcd_urls: list[str] = []
+    cited_domains: list[str] = []
+    cited_urls: list[str] = []
+    answer_text_hash: str | None = None
+
+    if status == "success":
+        aio_generated = True
+        raw_response = record.get("raw_response") or {}
+        search_result = raw_response.get("search_result") or {}
+        ai_overview_result = raw_response.get("ai_overview_result")
+        ai_overview = search_result.get("ai_overview") or (
+            (ai_overview_result or {}).get("ai_overview")
+        ) or {}
+
+        text = ai_overview.get("text", "") or ""
+        if text:
+            answer_text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        tcd_cited = False
+        for ref in ai_overview.get("references", []):
+            if isinstance(ref, str):
+                url, src_name = ref, ""
+            else:
+                url = ref.get("link", "") or ref.get("url", "")
+                if url.startswith("https://www.google.com/"):
+                    url = ""
+                src = ref.get("source", {})
+                src_name = src.get("name", "") if isinstance(src, dict) else str(src)
+
+            domain = _resolve_domain(_extract_root_domain(url) or src_name, alias_lookup)
+            if url:
+                cited_urls.append(url)
+            if domain:
+                cited_domains.append(domain)
+
+            haystack = f"{url} {domain} {src_name}".lower()
+            if any(p in haystack for p in _TCD_PATTERNS):
+                tcd_cited = True
+                if url:
+                    tcd_urls.append(url)
+
+    elif status == "not_generated":
+        aio_generated = False
+        tcd_cited = None
+    else:
+        aio_generated = None
+        tcd_cited = None
+
+    return {
+        "observed_at": record["observed_at"],
+        "query": record["query"],
+        "acquisition_status": status,
+        "aio_generated": aio_generated,
+        "tcd_cited": tcd_cited,
+        "tcd_urls": tcd_urls,
+        "cited_domains": cited_domains,
+        "cited_urls": cited_urls,
+        "answer_text_hash": answer_text_hash,
+        "error_message": record.get("error_message"),
+    }
+
+
+def build_aio_processed_table(records: list[dict], competitor_domains_cfg: dict | None = None) -> list[dict]:
+    return [build_aio_observation(r, competitor_domains_cfg) for r in records]

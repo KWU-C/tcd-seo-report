@@ -1,0 +1,20 @@
+# 「⑧ 上位ランディングページ」（/branding/配下・動的抽出）から除外するURL。
+#
+# 定点観測ページ（config_v2/pages.yaml）とは別の仕組み。pages.yamlに載っている
+# ページはpage_idが解決されるため自動的に候補から除外されるが、
+# 「pages.yamlには入れないが、上位ランディングページ一覧にも出したくない」
+# ページ（採用ページ・キャンペーンLP等）はここに追加する。
+#
+# 削除して見えなくするのではなく、除外リストとしてレポート⑧に一覧表示される
+# （何を除外しているかを常に見える化するため）。
+#
+# 記入例:
+# excluded_urls:
+#   - url: "https://tcd.jp/branding/03-news/example.html"
+#     reason: "採用ページのため市場分析の対象外"
+#     excluded_at: "2026-08-01"
+
+excluded_urls:
+  - url: "https://tcd.jp/branding/osugi/overseas_newyork_02.html"
+    excluded_at: "2026-07-27"
+

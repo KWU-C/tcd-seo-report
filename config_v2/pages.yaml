@@ -1,0 +1,254 @@
+# 監視対象マスタ（固定ページのみ）
+#
+# 出典: Page-List - シート1.csv（ユーザー管理の正本）
+# このファイルは「ページ一覧」ではなく「監視対象マスタ」。
+# 以後のレポート生成・分析はコードにURLをハードコードせず、本ファイルを参照すること。
+#
+# group:     service | branding   … Page-List.csv の「カテゴリ」列に対応
+# category:  service | definition … Page-List.csv の「ページ種」列に対応
+#            ※ landing（マガジン上位ランディングページ）はここに含めない。
+#              固定リストではなく毎週のSearch Consoleデータから動的抽出する対象のため、
+#              設計上あえて本マスタから分離している。
+# priority:  運用で変わるため固定管理しない。未設定は null。
+# enabled:   true | false（現時点では全ページ true）
+# objective: ページ群ごとの分析軸（複数可）。既定は group/category から付与し、
+#            個別ページで実態と異なる場合は明示的に上書きする（例: 大阪ページ）。
+#
+# id は URL のパス末尾（拡張子除く）から機械的に生成。ハイフン/アンダースコアは
+# 元URL表記のまま保持し、自動的な同一視は行わない。
+
+pages:
+  - id: service-corporate_branding
+    title: 企業ブランディング支援
+    url: https://tcd.jp/service/corporate_branding.html
+    group: service
+    category: service
+    priority: null
+    enabled: true
+    objective: [conversion]
+
+  - id: service-startup_branding
+    title: 新事業・スタートアップ支援
+    url: https://tcd.jp/service/startup_branding.html
+    group: service
+    category: service
+    priority: null
+    enabled: true
+    objective: [conversion]
+
+  - id: service-inner_branding
+    title: インナーブランディング支援
+    url: https://tcd.jp/service/inner_branding.html
+    group: service
+    category: service
+    priority: null
+    enabled: true
+    objective: [conversion]
+
+  - id: service-prd_branding
+    title: 商品ブランディング・商品開発支援
+    url: https://tcd.jp/service/prd_branding.html
+    group: service
+    category: service
+    priority: null
+    enabled: true
+    objective: [conversion]
+
+  - id: service-naming
+    title: ネーミング開発支援
+    url: https://tcd.jp/service/naming.html
+    group: service
+    category: service
+    priority: null
+    enabled: true
+    objective: [conversion]
+
+  - id: service-brand_promotion
+    title: ブランド・コミュニケーション支援
+    url: https://tcd.jp/service/brand_promotion.html
+    group: service
+    category: service
+    priority: null
+    enabled: true
+    objective: [conversion]
+
+  - id: service-branding
+    title: ブランディングとは？
+    url: https://tcd.jp/service/branding.html
+    group: service
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: service-brand_running
+    title: ブランド浸透とは？
+    url: https://tcd.jp/service/brand_running.html
+    group: service
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: service-brand_strategy
+    title: ブランド戦略とは？
+    url: https://tcd.jp/service/brand_strategy.html
+    group: service
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: service-brand_asset
+    title: ブランド管理・運用とは？
+    url: https://tcd.jp/service/brand_asset.html
+    group: service
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: service-about_innerbranding
+    title: インナーブランディングとは？
+    url: https://tcd.jp/service/about_innerbranding.html
+    group: service
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: service-about_branding_company
+    # 公開ページの<title>/H1で補完済み（Page-List.csvでは末尾が切れていた）
+    title: 企業がブランディング会社に依頼する理由
+    url: https://tcd.jp/service/about_branding_company.html
+    group: service
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-integrated-branding
+    title: TCDの統合型ブランディング
+    url: https://tcd.jp/branding/definition/integrated-branding.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-corporate-branding
+    title: 企業ブランディングとは？企業全体を一つのブランドとして設計・運用する活動
+    url: https://tcd.jp/branding/definition/corporate-branding.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-product-branding
+    title: 商品ブランディングとは？ブランド戦略を商品接点と顧客認識へつなぐ方法
+    url: https://tcd.jp/branding/definition/product-branding.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-purpose_action
+    title: パーパスが社内に浸透しない理由と、組織を変える5つの問い
+    url: https://tcd.jp/branding/definition/purpose_action.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-purpose
+    title: パーパス経営とは？企業ブランディングにおけるMVVBモデルの意義
+    url: https://tcd.jp/branding/definition/purpose.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-brand-naming
+    title: グローバルネーミング開発の注意点｜海外商標と言語・文化チェックの実例
+    url: https://tcd.jp/branding/definition/brand-naming.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-branding-kpi
+    title: ブランディング効果の測定方法｜KPI設定と「検討意向率」が重要な理由
+    url: https://tcd.jp/branding/definition/branding-kpi.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-product-brand-value
+    title: 商品ブランディングの「世界観」とは？情緒的価値で顧客共感を生む方法
+    url: https://tcd.jp/branding/definition/product-brand-value.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-brand-strategy
+    title: マーケティングリサーチとは？ 仮説を検証するための市場調査の考え方
+    url: https://tcd.jp/branding/definition/brand-strategy.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-brandvalue
+    title: ブランド提供価値とは？機能的価値・情緒的価値・社会的価値の構造
+    url: https://tcd.jp/branding/definition/brandvalue.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-personalization_of_purpose
+    title: 組織文化とは？ブランド戦略を判断と行動に変える仕組み
+    url: https://tcd.jp/branding/definition/personalization_of_purpose.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-brand-purpose
+    title: ブランド戦略とは？企業活動を接続する共通判断基準のつくり方
+    url: https://tcd.jp/branding/definition/brand-purpose.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-inner-branding
+    title: インナーブランディングとは？ブランド戦略を組織行動へ変換する仕組み
+    url: https://tcd.jp/branding/definition/inner-branding.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [knowledge]
+
+  - id: branding-osaka-branding-company
+    title: 大阪でブランディング会社を選ぶ前に｜比較観点と依頼先選定のチェックリスト
+    url: https://tcd.jp/branding/03-news/osaka-branding-company.html
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [regional, comparison]

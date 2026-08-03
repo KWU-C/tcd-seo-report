@@ -1,0 +1,45 @@
+# 分析閾値定義
+#
+# すべて初期値の仮置き。コードに固定値を埋め込まず、本ファイルを参照する。
+# 運用データを見て調整する前提（requirements.md 13節・オープン事項4）。
+# aio.* / magazine_landing_pages.top_n は config/aio_monitor.yml の report セクションを継承。
+
+# 少数データの扱い（requirements.md 9節）
+low_data:
+  low_impressions: 50               # これ未満のImpressionは「参考値」として扱い、増減率を強調しない
+  low_clicks: 5                     # これ未満のClickも同上（例: 2→3クリックを「50%成長」と書かない）
+  position_change_meaningful: 2.0   # 順位変動がこの値未満は「実質変化なし」として扱う
+  minimum_weeks_for_trend: 3        # 「傾向」と呼ぶために必要な最低週数（4週推移等の判定に使用）
+
+# Confidence判定（High / Medium / Low / Not assessable）の判断材料
+# 具体的な閾値との対応づけ（例: データ量がlow_impressions未満ならHighにしない等）は
+# 分析ロジック実装時に確定する。ここでは判断材料の一覧のみ固定する。
+confidence:
+  levels: [High, Medium, Low, "Not assessable"]
+  factors:
+    - データ量（low_impressions/low_clicksを下回っていないか）
+    - AIO取得成功率（acquisition_status = success の割合）
+    - 複数週の継続性（minimum_weeks_for_trend以上のデータがあるか）
+    - SEOとAIOの一致（両方が同じ方向を示しているか）
+    - ページ単位とクエリ単位の一致
+
+# 施策評価タイミング（docs/current-initiatives.mdの実装日起点）
+# 実装日が unknown の施策は、day14/day28いずれの評価対象にも含めない。
+initiative_review:
+  day14_after_implementation: 14
+  day28_after_implementation: 28
+
+# AIOアラート閾値（config/aio_monitor.yml report.aio_min_impressions / aio_alert_threshold を継承）
+aio:
+  min_impressions_for_alert: 50        # このImpressionを超えるクエリのみAIOアラート対象にする
+  citation_share_alert_threshold: 0.4  # 引用シェアの急変とみなすアラート閾値
+
+# マガジン上位ランディングページの動的抽出件数（config/aio_monitor.yml report.top_n を継承）
+magazine_landing_pages:
+  top_n: 20
+
+# レポート表示用の順位変化3段階（report.html改善指示書 8節）。
+# low_data.position_change_meaningful（Confidence判定用）とは目的が異なるため分離する。
+display:
+  position_delta_flat: 1.0    # これ未満の変化幅は「横ばい」表示（矢印なし）
+  position_delta_minor: 3.0   # これ未満は「軽微な変化」、これ以上は「改善／悪化」表示
