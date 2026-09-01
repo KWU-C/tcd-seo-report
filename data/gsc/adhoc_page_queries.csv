@@ -1,0 +1,45 @@
+﻿period,query,clicks,impressions,ctr,position,classification,is_new_query
+current_week,雑貨 ブランディング,0,89,0.0,9.52,general,True
+current_week,商品開発 イメージ,0,66,0.0,28.32,general,False
+current_week,パッケージデザイン 商品化 管理,0,35,0.0,7.66,general,False
+current_week,商品デザイン,0,33,0.0,11.58,general,False
+current_week,商品開発 パッケージデザイン,0,28,0.0,8.18,general,False
+current_week,ブランド開発,0,23,0.0,5.78,general,False
+current_week,ストラテジーを基にするブランディングとパッケージデザイン制作,0,21,0.0,42.33,natural_language,False
+current_week,商品開発 デザイン,0,19,0.0,1.0,general,False
+current_week,ブランディング パッケージ,0,13,0.0,79.62,general,False
+current_week,ブランディング フェーズ,0,6,0.0,2.33,general,True
+current_week,商品 デザイン,0,6,0.0,16.17,general,False
+current_week,商品ブランディング,0,5,0.0,5.8,general,False
+current_week,商品 ブランディング,0,2,0.0,5.0,general,True
+current_week,ブランディング 商品,0,1,0.0,5.0,general,True
+current_week,プロダクトブランディング,0,1,0.0,1.0,general,True
+current_week,商品 ブランディング ビジュアル,0,1,0.0,1.0,general,True
+previous_week,商品開発 パッケージデザイン,0,32,0.0,10.75,general,False
+previous_week,パッケージデザイン 商品化 管理,0,31,0.0,15.9,general,False
+previous_week,ストラテジーを基にするブランディングとパッケージデザイン制作,0,16,0.0,44.5,natural_language,False
+previous_week,商品デザイン,0,16,0.0,13.62,general,False
+previous_week,ブランド開発,0,11,0.0,6.82,general,False
+previous_week,商品開発 デザイン,0,7,0.0,2.14,general,False
+previous_week,ブランディング パッケージ,0,3,0.0,83.67,general,False
+previous_week,商品ブランディング,0,2,0.0,5.0,general,False
+previous_week,商品開発 イメージ,0,2,0.0,35.0,general,False
+previous_week,ブランディングボード,0,1,0.0,4.0,general,False
+previous_week,商品 デザイン,0,1,0.0,15.0,general,False
+reference_90d,雑貨 ブランディング,0,89,0.0,9.52,general,False
+reference_90d,パッケージデザイン 商品化 管理,0,71,0.0,11.42,general,False
+reference_90d,商品開発 イメージ,0,68,0.0,28.51,general,False
+reference_90d,商品開発 パッケージデザイン,0,60,0.0,9.55,general,False
+reference_90d,商品デザイン,0,58,0.0,12.31,general,False
+reference_90d,ストラテジーを基にするブランディングとパッケージデザイン制作,0,37,0.0,43.27,natural_language,False
+reference_90d,ブランド開発,0,34,0.0,6.12,general,False
+reference_90d,商品開発 デザイン,0,26,0.0,1.31,general,False
+reference_90d,ブランディング パッケージ,0,16,0.0,80.38,general,False
+reference_90d,商品 デザイン,0,7,0.0,16.0,general,False
+reference_90d,商品ブランディング,0,7,0.0,5.57,general,False
+reference_90d,ブランディング フェーズ,0,6,0.0,2.33,general,False
+reference_90d,商品 ブランディング,0,2,0.0,5.0,general,False
+reference_90d,ブランディング 商品,0,1,0.0,5.0,general,False
+reference_90d,ブランディングボード,0,1,0.0,4.0,general,False
+reference_90d,プロダクトブランディング,0,1,0.0,1.0,general,False
+reference_90d,商品 ブランディング ビジュアル,0,1,0.0,1.0,general,False
