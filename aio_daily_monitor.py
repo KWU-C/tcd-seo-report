@@ -35,7 +35,7 @@ TCD_DOMAIN_DEFAULT = "tcd.jp"
 
 DAILY_CSV_COLUMNS = [
     "date", "query", "aio_exists", "tcd_cited", "tcd_mentioned",
-    "aio_text_hash", "aio_text_changed", "status",
+    "aio_text_hash", "aio_text_changed", "observation_type", "previous_hash_exists", "status",
 ]
 DOMAINS_CSV_COLUMNS = ["date", "query", "cited_domain", "cited_domain_count"]
 
@@ -64,6 +64,26 @@ def load_config(path: str) -> dict:
 def _extract_domain(url: str) -> str:
     m = re.search(r'https?://([^/]+)', url)
     return m.group(1) if m else url
+
+
+def _root_domain(hostname: str) -> str:
+    """www. サブドメインをルートドメインへ正規化する。"""
+    h = (hostname or "").lower().strip()
+    return h[4:] if h.startswith("www.") else h
+
+
+_DOMAIN_LIKE_RE = re.compile(r'^[a-z0-9.-]+\.[a-z]{2,}$', re.IGNORECASE)
+
+
+def _looks_like_domain(s: str) -> bool:
+    """'www.example.com' のようなホスト名らしい文字列か判定する（会社名の誤正規化を防ぐ）。"""
+    return bool(_DOMAIN_LIKE_RE.match((s or "").strip()))
+
+
+def is_google_domain(domain: str) -> bool:
+    """Google検索・Google自身のURL（support.google.comなど）かどうかを判定する。"""
+    d = (domain or "").lower()
+    return d == "google" or "google." in d
 
 
 def _flatten_text_block(block: dict) -> list[str]:
@@ -175,13 +195,17 @@ def fetch_aio_for_query(
 
             for ref in ai_ov.get("references", []):
                 if isinstance(ref, str):
-                    url, domain, title = ref, _extract_domain(ref), ""
+                    url, src_name, title = ref, "", ""
                 else:
                     url = ref.get("url", "")
                     src = ref.get("source", {})
-                    domain = (src.get("name", "") if isinstance(src, dict) else str(src)) or _extract_domain(url)
+                    src_name = (src.get("name", "") if isinstance(src, dict) else str(src))
                     title = ref.get("title", "")
-                domain = normalize_domain(domain, alias_lookup)
+                # ドメイン（正規化キー）は必ずURLのホスト名から求め、
+                # 表示名（会社名など）と混同しない。www.はルートドメインへ正規化する。
+                url_domain = _root_domain(_extract_domain(url)) if url else ""
+                fallback = _root_domain(src_name) if _looks_like_domain(src_name) else src_name
+                domain = normalize_domain(url_domain, alias_lookup) if url_domain else normalize_domain(fallback, alias_lookup)
                 if url:
                     cited_urls.append(url)
                 if domain:
@@ -198,7 +222,10 @@ def fetch_aio_for_query(
                         any(tcd_needle in u.lower() for u in cited_urls)
             result["tcd_cited"] = tcd_cited
             result["tcd_mentioned"] = tcd_cited or (tcd_needle in aio_text.lower())
-            result["competitor_domains"] = [d for d in cited_domains if tcd_needle not in d.lower()]
+            result["competitor_domains"] = [
+                d for d in cited_domains
+                if tcd_needle not in d.lower() and not is_google_domain(d)
+            ]
 
     except Exception as e:
         result["status"] = "FETCH_ERROR"
@@ -229,13 +256,28 @@ def get_previous_hashes(csv_path: Path, before_date: str) -> dict[str, str]:
 
 
 def build_daily_rows(results: list[dict], previous_hashes: dict[str, str]) -> list[dict]:
-    """クエリ粒度の Looker Studio 用 CSV 行を組み立てる。"""
+    """クエリ粒度の Looker Studio 用 CSV 行を組み立てる。
+
+    初回観測（そのクエリについて過去のハッシュが存在しない）は「本文変更」に
+    カウントせず、observation_type="baseline" として扱う。
+    """
     rows = []
     for r in results:
         aio_text = r.get("aio_text") or ""
         text_hash = hashlib.sha256(aio_text.encode("utf-8")).hexdigest()[:16] if aio_text else ""
+        previous_hash_exists = r["query"] in previous_hashes
         prev_hash = previous_hashes.get(r["query"], "")
-        aio_text_changed = bool(text_hash) and text_hash != prev_hash
+
+        if not previous_hash_exists:
+            observation_type = "baseline"
+            aio_text_changed = False
+        elif text_hash == prev_hash:
+            observation_type = "unchanged"
+            aio_text_changed = False
+        else:
+            observation_type = "changed"
+            aio_text_changed = True
+
         rows.append({
             "date": r["observed_at"],
             "query": r["query"],
@@ -244,17 +286,22 @@ def build_daily_rows(results: list[dict], previous_hashes: dict[str, str]) -> li
             "tcd_mentioned": r["tcd_mentioned"],
             "aio_text_hash": text_hash,
             "aio_text_changed": aio_text_changed,
+            "observation_type": observation_type,
+            "previous_hash_exists": previous_hash_exists,
             "status": r["status"],
         })
     return rows
 
 
 def build_domain_rows(results: list[dict]) -> list[dict]:
-    """引用ドメイン粒度（1行1ドメイン）の Looker Studio 用 CSV 行を組み立てる。"""
+    """引用ドメイン粒度（1行1ドメイン）の Looker Studio 用 CSV 行を組み立てる。
+    Google検索・Google自身のドメインは競合ドメインではないため除外する。"""
     rows = []
     for r in results:
         counts: dict[str, int] = {}
         for d in r.get("cited_domains", []):
+            if is_google_domain(d):
+                continue
             counts[d] = counts.get(d, 0) + 1
         for domain, count in counts.items():
             rows.append({

@@ -38,6 +38,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+import page_query_analysis as pqa
+
 
 # ────────────────────────────────────────────────────────────────────
 # 定数
@@ -237,6 +239,22 @@ def fetch_queries(svc, site, s, e, n=5000) -> pd.DataFrame:
 def fetch_pages(svc, site, s, e, n=5000) -> pd.DataFrame:
     return _to_df(_fetch_rows(svc, site, s, e, ["page"], row_limit=n), ["page"])
 
+def fetch_page_first_dates(svc, site: str, full_url: str, start_date: str, end_date: str) -> tuple[str | None, str | None]:
+    """指定ページの日次データから、初回Impression日・初回Click日を取得する。"""
+    rows = _fetch_rows(
+        svc, site, start_date, end_date, ["date"],
+        dimension_filter={"dimension": "page", "operator": "equals", "expression": full_url},
+    )
+    df = _to_df(rows, ["date"])
+    if df.empty:
+        return None, None
+    df = df.sort_values("date")
+    imp_rows = df[df["impressions"] > 0]
+    click_rows = df[df["clicks"] > 0]
+    first_impression = imp_rows.iloc[0]["date"] if not imp_rows.empty else None
+    first_click = click_rows.iloc[0]["date"] if not click_rows.empty else None
+    return first_impression, first_click
+
 def fetch_devices(svc, site, s, e) -> pd.DataFrame:
     return _to_df(_fetch_rows(svc, site, s, e, ["device"]), ["device"])
 
@@ -346,6 +364,26 @@ def _extract_domain(url: str) -> str:
     return m.group(1) if m else url
 
 
+def _root_domain(hostname: str) -> str:
+    """www. サブドメインをルートドメインへ正規化する。"""
+    h = (hostname or "").lower().strip()
+    return h[4:] if h.startswith("www.") else h
+
+
+_DOMAIN_LIKE_RE = re.compile(r'^[a-z0-9.-]+\.[a-z]{2,}$', re.IGNORECASE)
+
+
+def _looks_like_domain(s: str) -> bool:
+    """'www.example.com' のようなホスト名らしい文字列か判定する（会社名の誤正規化を防ぐ）。"""
+    return bool(_DOMAIN_LIKE_RE.match((s or "").strip()))
+
+
+def is_google_domain(domain: str) -> bool:
+    """Google検索・Google自身のURL（support.google.com, maps.google.co.jpなど）かどうかを判定する。"""
+    d = (domain or "").lower()
+    return d == "google" or "google." in d
+
+
 def build_domain_alias_lookup(domain_aliases: dict | None) -> dict[str, str]:
     """config の domain_aliases から 正規化キー→正規ドメイン の逆引き辞書を作る。"""
     lookup: dict[str, str] = {}
@@ -362,6 +400,14 @@ def normalize_domain(raw: str, alias_lookup: dict[str, str]) -> str:
     if not raw:
         return raw
     return alias_lookup.get(_normalize_query(raw), raw)
+
+
+def normalize_domain_strict(raw: str, alias_lookup: dict[str, str]) -> str:
+    """alias_lookup に一致した場合のみドメインを返す。一致しなければ空文字を返す
+    （会社名をそのままdomain列へ代入しないため。URLが取得できない参照に使う）。"""
+    if not raw:
+        return ""
+    return alias_lookup.get(_normalize_query(raw), "")
 
 
 def fetch_google_aio(
@@ -382,7 +428,7 @@ def fetch_google_aio(
         return [{"query": q, "observed_at": date.today().strftime("%Y-%m-%d"),
                  "status": "API_KEY_MISSING", "aio_exists": None,
                  "tcd_mentioned": False, "tcd_cited": False,
-                 "cited_urls": [], "cited_domains": [], "competitor_domains": [],
+                 "cited_urls": [], "cited_domain_urls": [], "cited_domains": [], "competitor_domains": [],
                  "error": "SERPAPI_API_KEY 未設定"} for q in queries]
 
     cfg = aio_cfg or {}
@@ -411,7 +457,9 @@ def fetch_google_aio(
         aio_exists        = False
         aio_text          = None
         cited_urls:   list[str] = []
+        cited_domain_urls: list[str] = []
         cited_domains:list[str] = []
+        cited_display_names: list[str] = []
         cited_titles: list[str] = []
         tcd_mentioned     = False
         tcd_cited         = False
@@ -450,18 +498,39 @@ def fetch_google_aio(
 
                 for ref in ai_ov.get("references", []):
                     if isinstance(ref, str):
-                        url, domain, title = ref, _extract_domain(ref), ""
+                        url, src_name, title = ref, "", ""
                     else:
-                        url    = ref.get("url", "")
-                        src    = ref.get("source", {})
-                        domain = (src.get("name", "") if isinstance(src, dict) else str(src)) or _extract_domain(url)
-                        title  = ref.get("title", "")
-                    domain = normalize_domain(domain, alias_lookup)
-                    if url:    cited_urls.append(url)
-                    if domain: cited_domains.append(domain)
-                    if title:  cited_titles.append(title)
+                        # SerpAPIのai_overview.references[]は "link"キー（"url"ではない）。
+                        # sourceが"Google"の参照はGoogle内部のビューアリンクであり実際の外部URLではないため、
+                        # cited_urls等に混入させない（外部ドメインではないのでスクレイピング対象にもならない）。
+                        raw_link = ref.get("link", "") or ref.get("url", "")
+                        url      = "" if raw_link.startswith("https://www.google.com/") else raw_link
+                        src      = ref.get("source", {})
+                        src_name = (src.get("name", "") if isinstance(src, dict) else str(src))
+                        title    = ref.get("title", "")
+                    # ドメイン（正規化キー）は必ずURLのホスト名から求め、
+                    # 表示名（会社名など）と混同しない。www.はルートドメインへ正規化する。
+                    # URLが取得できない参照は、config.domain_aliasesに登録済みの会社名のみ
+                    # ドメインへ解決する。未登録の会社名はdomainを空欄のままにし、
+                    # 会社名をdomain列へ代入しない（表示はdisplay_nameで行う）。
+                    url_domain = _root_domain(_extract_domain(url)) if url else ""
+                    fallback = _root_domain(src_name) if _looks_like_domain(src_name) else src_name
+                    domain = (
+                        normalize_domain(url_domain, alias_lookup) if url_domain
+                        else normalize_domain_strict(fallback, alias_lookup)
+                    )
+                    display_name = src_name or domain or url or "unknown"
 
-                    chk = (url + " " + domain + " " + title).lower()
+                    # cited_domains / cited_display_names / cited_domain_urls は常に同じ添字で対応させる
+                    # （domainが空欄でもエンティティを区別できるようにするため）。
+                    # cited_urls は表示専用の非空URLのみのリスト（添字は対応しない）。
+                    if url: cited_urls.append(url)
+                    cited_domains.append(domain)
+                    cited_domain_urls.append(url)
+                    cited_display_names.append(display_name)
+                    if title: cited_titles.append(title)
+
+                    chk = (url + " " + domain + " " + src_name + " " + title).lower()
                     if any(p.lower() in chk for p in _TCD_PATTERNS):
                         tcd_cited = True
                         tcd_cited_urls.append(url)
@@ -469,7 +538,8 @@ def fetch_google_aio(
                 check_text = (aio_text or "").lower()
                 tcd_mentioned = any(p.lower() in check_text for p in _TCD_PATTERNS) or tcd_cited
                 competitor_domains = [d for d in cited_domains
-                                      if not any(p.lower() in d.lower() for p in _TCD_PATTERNS)][:5]
+                                      if d and not any(p.lower() in d.lower() for p in _TCD_PATTERNS)
+                                      and not is_google_domain(d)][:5]
 
         except Exception as e:
             error  = str(e)
@@ -483,7 +553,9 @@ def fetch_google_aio(
             "aio_exists":         aio_exists,
             "aio_text":           aio_text,
             "cited_urls":         cited_urls,
+            "cited_domain_urls":  cited_domain_urls,
             "cited_domains":      cited_domains,
+            "cited_display_names": cited_display_names,
             "cited_titles":       cited_titles,
             "tcd_mentioned":      tcd_mentioned,
             "tcd_cited":          tcd_cited,
@@ -506,10 +578,10 @@ AIO_DOMAINS_CSV_PATH = "data/aio/looker/aio_domains_daily.csv"
 
 _AIO_DAILY_COLUMNS = [
     "date", "query", "aio_exists", "tcd_cited", "tcd_mentioned",
-    "aio_text_hash", "aio_text_changed", "status",
+    "aio_text_hash", "aio_text_changed", "observation_type", "previous_hash_exists", "status",
 ]
 _AIO_DOMAINS_COLUMNS = ["date", "query", "cited_domain", "cited_domain_count"]
-_AIO_DAILY_BOOL_COLUMNS = ["aio_exists", "tcd_cited", "tcd_mentioned", "aio_text_changed"]
+_AIO_DAILY_BOOL_COLUMNS = ["aio_exists", "tcd_cited", "tcd_mentioned", "aio_text_changed", "previous_hash_exists"]
 
 
 def load_aio_daily_csv(path: str = AIO_DAILY_CSV_PATH) -> pd.DataFrame:
@@ -565,12 +637,24 @@ def load_aio_domains_daily_csv(path: str = AIO_DOMAINS_CSV_PATH) -> pd.DataFrame
     return df
 
 
+AIO_DAILY_MIN_REFERENCE_DAYS = 3   # これ未満は「参考値」表示
+AIO_DAILY_MIN_COMPARISON_DAYS = 7  # これ未満は週次比較を行わない
+
+
 def aggregate_aio_daily(df: pd.DataFrame, start: str, end: str) -> dict:
-    """aio_daily.csv を、週次/月次レポートと同じ対象期間で集計する。"""
+    """aio_daily.csv を、週次/月次レポートと同じ対象期間で集計する。
+
+    observed_days（実際に観測できた日数）が expected_days（対象期間の日数）に
+    満たない場合、AIO表示率・引用率は「参考値」として扱う（observed_daysが
+    AIO_DAILY_MIN_REFERENCE_DAYS未満の場合は特に強く警告する）。
+    """
+    expected_days = (datetime.strptime(end, "%Y-%m-%d") - datetime.strptime(start, "%Y-%m-%d")).days + 1
     empty = {
         "aio_query_count": 0, "aio_exists_count": 0, "aio_exists_rate": None,
         "tcd_cited_count": 0, "tcd_cited_rate": None, "tcd_mentioned_count": 0,
         "aio_text_changed_count": 0, "error_count": 0, "query_level": [],
+        "observed_days": 0, "expected_days": expected_days, "coverage_rate": 0.0,
+        "is_reference_only": True, "supports_weekly_comparison": False,
     }
     if df.empty or "date" not in df.columns:
         return empty
@@ -580,6 +664,8 @@ def aggregate_aio_daily(df: pd.DataFrame, start: str, end: str) -> dict:
         return empty
 
     n_rows               = len(period)
+    observed_days         = period["date"].nunique()
+    coverage_rate          = observed_days / expected_days if expected_days else 0.0
     aio_exists_count      = int(period["aio_exists"].sum())
     tcd_cited_count       = int(period["tcd_cited"].sum())
     tcd_mentioned_count   = int(period["tcd_mentioned"].sum())
@@ -594,6 +680,7 @@ def aggregate_aio_daily(df: pd.DataFrame, start: str, end: str) -> dict:
             "query":                 query,
             "aio_exists_days":       aio_days,
             "aio_exists_rate":       aio_days / n_days if n_days else None,
+            "observed_days":         n_days,
             "tcd_cited_days":        int(g["tcd_cited"].sum()),
             "tcd_mentioned_days":    int(g["tcd_mentioned"].sum()),
             "latest_status":         g.sort_values("date").iloc[-1]["status"],
@@ -611,6 +698,11 @@ def aggregate_aio_daily(df: pd.DataFrame, start: str, end: str) -> dict:
         "aio_text_changed_count": aio_text_changed_count,
         "error_count":            error_count,
         "query_level":            query_level,
+        "observed_days":          observed_days,
+        "expected_days":          expected_days,
+        "coverage_rate":          coverage_rate,
+        "is_reference_only":      observed_days < AIO_DAILY_MIN_REFERENCE_DAYS,
+        "supports_weekly_comparison": observed_days >= AIO_DAILY_MIN_COMPARISON_DAYS,
     }
 
 
@@ -666,6 +758,85 @@ def aggregate_aio_domain_trend(df: pd.DataFrame, cur_start: str, cur_end: str, p
     }
 
 
+_ENTITY_TYPE_LABEL = {
+    "branding_company": "ブランディング会社",
+    "consulting_company": "コンサル会社",
+    "client_company": "クライアント企業",
+    "media": "メディア",
+    "public_institution": "行政機関",
+    "financial_institution": "金融機関",
+    "platform": "プラットフォーム",
+    "unknown": "分類未登録",
+}
+
+
+def build_citation_trends(trend: dict, domain_entity_types: dict, weekly_snapshot_ranking: list[dict] | None = None) -> dict:
+    """引用ドメインの一覧表示ではなく、「市場で誰の存在感が変化したか」を示す形に組み替える。
+    ドメインの一覧・引用回数はaggregate_aio_domain_trend()（日次AIO推移データ）の集計結果をそのまま使い、
+    ページ本文の内容分類（比較記事／定義記事等）は行わない（スクレイピングを伴わないため）。
+    日次AIO推移データが今週分未取得の場合は、継続/新規/消失の判定を空欄で3つ並べるのではなく、
+    週次AIOスナップショット（weekly_snapshot_ranking）から分かる範囲の参考情報に差し替える。"""
+    top_domains = (trend or {}).get("top_domains", [])
+    lost_rows = (trend or {}).get("lost_rows", [])
+    stable = [r for r in top_domains if r["status"] != "new"]
+    emerging = [r for r in top_domains if r["status"] == "new"]
+
+    # top_domainsが空 かつ lost_rowsが非空 は「今週分の日次AIO推移データが存在しない」ことを意味する
+    # （aggregate_aio_domain_trendは今週分の行が1件もなければtop_domainsを作れない）。
+    # この場合、前週の引用が実際に消失したのではなく単に観測できていないだけなので、
+    # 「消失」と断定せず判断保留とし、disappeared_playersも誤解を招くため空にする。
+    no_current_observation = not top_domains and bool(lost_rows)
+    disappeared = [] if no_current_observation else lost_rows
+
+    lines: list[str] = []
+    weekly_snapshot_note = None
+    if no_current_observation:
+        lines.append(
+            f"今週分の日次AIO推移データが未取得のため、継続・新規・消失の前週比較は判断保留です"
+            f"（前週は{len(lost_rows)}社の引用を観測済み）。"
+        )
+        competitors = [r for r in (weekly_snapshot_ranking or []) if not r.get("is_tcd") and r.get("count", 0) > 0]
+        top = sorted(competitors, key=lambda r: -r["count"])[:3]
+        if top:
+            names = "と".join(r["display_name"] for r in top)
+            weekly_snapshot_note = f"週次AIOスナップショット上では、{names}が複数市場で引用されています。"
+    elif not top_domains and not disappeared:
+        lines.append("対象期間中、AIOでの引用ドメインは観測されませんでした。")
+    else:
+        if stable:
+            names = "・".join(r["domain"] for r in stable[:3])
+            lines.append(f"継続的に引用されているのは{names}など{len(stable)}社で、市場での存在感を維持している。")
+        if emerging:
+            names = "・".join(r["domain"] for r in emerging[:3])
+            lines.append(f"今週新たに{names}など{len(emerging)}社が引用され、存在感を高めた可能性がある。")
+        if disappeared:
+            names = "・".join(r["domain"] for r in disappeared[:3])
+            lines.append(f"前週まで引用されていた{names}など{len(disappeared)}社は、今週は引用が確認できなかった。")
+        if not emerging and not disappeared:
+            lines.append("新規引用・引用消失はなく、引用元の構成は前週から安定している。")
+
+    # エンティティ種別の偏り（新規引用のうち同種が2社以上の場合のみ言及。1社のみでは傾向と呼べないため）
+    entity_counts: dict[str, int] = {}
+    for r in emerging:
+        label = _ENTITY_TYPE_LABEL.get(domain_entity_types.get(r["domain"], "unknown"), "分類未登録")
+        entity_counts[label] = entity_counts.get(label, 0) + 1
+    entity_note = None
+    if entity_counts:
+        top_label, top_count = max(entity_counts.items(), key=lambda x: x[1])
+        if top_count >= 2:
+            entity_note = f"新規引用{len(emerging)}社のうち{top_count}社が「{top_label}」に分類されている。"
+
+    return {
+        "stable_players": stable,
+        "emerging_players": emerging,
+        "disappeared_players": disappeared,
+        "trend_summary": lines[:5],
+        "entity_note": entity_note,
+        "no_current_observation": no_current_observation,
+        "weekly_snapshot_note": weekly_snapshot_note,
+    }
+
+
 def aggregate_aio_text_changes(df: pd.DataFrame, start: str, end: str, limit: int = 10) -> dict:
     """対象期間中にAIO本文が変化したクエリを集計する（本文そのものは含めない）。"""
     if df.empty or "date" not in df.columns:
@@ -711,6 +882,132 @@ def kw_compare(cdf: pd.DataFrame, pdf: pd.DataFrame, keywords: list[str]) -> lis
     return out
 
 
+# ────────────────────────────────────────────────────────────────────
+# 市場存在感サマリー（レポート冒頭。ルールベース、LLM不使用）
+# ────────────────────────────────────────────────────────────────────
+
+# 順位帯ラベル（下限（超）, 上限（以下）, ラベル, ラベルに傾向語を付与するか）。
+# 順位は小数（例: 10.2位）を取るため、区間は隙間なく連続させる（下限は超過、上限は以下）。
+# 「1ページ目目前」等それ自体が状態を表す帯は傾向語を付けない（冗長になるため）。
+# 「◯位圏」の帯（16-20・21-30・30超）のみ「で改善中／横ばい／低下中」を付けて具体度を補う。
+_SEO_RANKING_BANDS = [
+    (0, 3, "上位定着", False),
+    (3, 10, "1ページ目", False),
+    (10, 15, "1ページ目目前", False),
+    (15, 20, "20位圏", True),
+    (20, 30, "30位圏", True),
+    (30, float("inf"), "圏外", True),
+]
+
+
+def _ranking_band(position: float) -> tuple[str, bool]:
+    for lo, hi, label, append_trend in _SEO_RANKING_BANDS:
+        if lo < position <= hi:
+            return label, append_trend
+    return "圏外", True
+
+
+def build_market_presence_summary(
+    key_kws: list[dict],
+    google_aio: list[dict],
+    gaio_previous: list[dict] | None,
+    queries: list[str],
+) -> list[dict]:
+    """対象市場ごとにSEO順位・AIO引用の週次方向性（up/hold/down）を1行サマリーで返す。
+    SEOの改善/低下判定は順位差だけでなく順位帯も考慮する（10位前後は僅かな差でも意味が大きいため）。
+    単純な±2.0位閾値だと「12.1→10.2（-1.9）」のような1ページ目到達間際の改善を横ばい扱いしてしまう。"""
+    kw_by_query = {r["query"]: r for r in key_kws}
+    aio_by_query = {r["query"]: r for r in google_aio}
+    prev_aio_by_query = {r["query"]: r for r in (gaio_previous or [])}
+
+    out = []
+    for q in queries:
+        kw = kw_by_query.get(q)
+        cur_pos = kw["cur"]["position"] if kw else 0.0
+        prv_pos = kw["prv"]["position"] if kw else 0.0
+        has_prv_seo = bool(kw and kw["prv"]["impressions"] > 0)
+
+        if not has_prv_seo:
+            seo_direction = "hold"
+        else:
+            diff = cur_pos - prv_pos  # 負=改善
+            near_page1 = cur_pos <= 12
+            improving = diff <= -2.0 or (near_page1 and diff <= -1.0)
+            declining = diff >= 2.0 or (near_page1 and diff >= 1.0)
+            seo_direction = "up" if improving else ("down" if declining else "hold")
+
+        aio_cur = aio_by_query.get(q)
+        aio_prev = prev_aio_by_query.get(q)
+        tcd_cited = bool(aio_cur.get("tcd_cited")) if aio_cur else False
+        tcd_cited_prev = bool(aio_prev.get("tcd_cited")) if aio_prev else None
+        competitor_cited = bool(aio_cur.get("competitor_domains")) if aio_cur else False
+
+        if tcd_cited_prev is None:
+            aio_direction = "hold"
+        elif tcd_cited and not tcd_cited_prev:
+            aio_direction = "up"
+        elif not tcd_cited and tcd_cited_prev:
+            aio_direction = "down"
+        else:
+            aio_direction = "hold"
+
+        if aio_direction == "down":
+            overall = "down"
+        elif seo_direction == "down" and aio_direction != "up":
+            overall = "down"
+        elif seo_direction == "up" or aio_direction == "up":
+            overall = "up"
+        else:
+            overall = "hold"
+
+        trend_word = {"up": "改善中", "down": "低下中", "hold": "横ばい"}[seo_direction]
+        if not has_prv_seo:
+            seo_status = "データ不足"
+            seo_comment = "SEOは表示回数が少なく判断材料が不足"
+        else:
+            band_label, append_trend = _ranking_band(cur_pos)
+            seo_status = f"{band_label}で{trend_word}" if append_trend else band_label
+            seo_comment = f"SEOは{seo_status}"
+        aio_comment = "AIO引用を獲得" if tcd_cited else "AIO引用は未獲得"
+        comment = f"{seo_comment}。{aio_comment}。"
+
+        if tcd_cited:
+            aio_status = "引用あり"
+        elif competitor_cited:
+            aio_status = "競合のみ引用"
+        else:
+            aio_status = "引用なし"
+
+        market_status = {"up": "上昇中", "hold": "横ばい", "down": "低下中"}[overall]
+
+        # 市場優先度: 市場機会の大きさを示す軸であり、Action Itemsの実行優先度（別軸）とは一致しない。
+        # 競合だけが引用され、かつ10〜20位圏でSEOが競える位置にいる市場を最優先とする
+        # （検索需要があり、AIOでも接近可能な市場を取りこぼさないため）。
+        contestable = has_prv_seo and 0 < cur_pos <= 20
+        if overall == "down":
+            priority = "高"
+        elif competitor_cited and not tcd_cited and contestable:
+            priority = "高"
+        elif overall == "up" or (competitor_cited and not tcd_cited):
+            priority = "中"
+        else:
+            priority = "低"
+
+        out.append({
+            "market": q,
+            "seo": {"current_position": round(cur_pos, 1) if has_prv_seo or cur_pos else 0.0,
+                    "previous_position": round(prv_pos, 1) if has_prv_seo else None,
+                    "direction": seo_direction, "status": seo_status},
+            "aio": {"tcd_cited": tcd_cited, "competitor_cited": competitor_cited,
+                    "direction": aio_direction, "status": aio_status},
+            "overall": overall,
+            "market_status": market_status,
+            "market_priority": priority,
+            "comment": comment,
+        })
+    return out
+
+
 def _lookup_page(df: pd.DataFrame, url: str) -> dict:
     """末尾スラッシュ有無の両バリアントで照合し、ヒット行を集計して返す。"""
     empty = {"clicks": 0, "impressions": 0, "ctr": 0.0, "position": 0.0}
@@ -750,12 +1047,21 @@ def page_compare(cdf: pd.DataFrame, pdf: pd.DataFrame, cfgs: list[dict], site_ur
     return out
 
 
-def compute_index_monitoring(entries: list[dict], cur_df: pd.DataFrame, prv_df: pd.DataFrame, site_url: str) -> list[dict]:
+def compute_index_monitoring(
+    entries: list[dict],
+    cur_df: pd.DataFrame,
+    prv_df: pd.DataFrame,
+    site_url: str,
+    service: Any = None,
+    cur_end: str | None = None,
+) -> list[dict]:
     """新規・更新ページがSearch Console上に出始めたかを追跡する。
     注: Search Analytics APIにはインデックス有無の情報がないため、
-    「indexed_no_impression」（クロール済みだが表示回数ゼロ）はURL Inspection API連携が必要で未対応。
-    現状はImp/Clickの有無から not_seen / impression_started / ranking_started の3状態を判定する。"""
+    「indexed」（クロール済みだが表示回数がごく僅か）はURL Inspection API連携が必要で厳密判定は未対応。
+    ここでは公開日以降の日次データから初回Impression日・初回Click日を実測し、
+    not_detected / indexed / gaining_impressions / gaining_clicks の4状態で判定する。"""
     base = site_url.rstrip("/")
+    today = datetime.today().date()
     out = []
     for e in entries:
         path  = e.get("url", "")
@@ -764,28 +1070,40 @@ def compute_index_monitoring(entries: list[dict], cur_df: pd.DataFrame, prv_df: 
         full_url = (base + path) if path.startswith("/") else path
 
         cur = _lookup_page(cur_df, full_url)
-        prv = _lookup_page(prv_df, full_url)
-        ever_seen = cur["impressions"] > 0 or prv["impressions"] > 0
 
-        if not ever_seen:
-            status = "not_seen"
-            first_seen = None
+        days_since_publish = None
+        if pub_date:
+            try:
+                days_since_publish = (today - datetime.strptime(pub_date, "%Y-%m-%d").date()).days
+            except ValueError:
+                days_since_publish = None
+
+        first_impression_date, first_click_date = (None, None)
+        if service is not None and pub_date and cur_end:
+            first_impression_date, first_click_date = fetch_page_first_dates(
+                service, site_url, full_url, pub_date, cur_end
+            )
+
+        if first_impression_date is None:
+            status = "not_detected"
         elif cur["clicks"] > 0:
-            status = "ranking_started"
-            first_seen = pub_date or None
+            status = "gaining_clicks"
+        elif cur["impressions"] >= 5:
+            status = "gaining_impressions"
         else:
-            status = "impression_started"
-            first_seen = pub_date or None
+            status = "indexed"
 
         out.append({
-            "page_title":                    title,
-            "url":                           full_url,
-            "published_or_updated_date":     pub_date,
-            "first_seen_in_search_console":  first_seen,
-            "impressions":                   cur["impressions"],
-            "clicks":                        cur["clicks"],
-            "average_position":              cur["position"],
-            "status":                        status,
+            "page_title":            title,
+            "url":                   full_url,
+            "published_or_updated_date": pub_date,
+            "days_since_publish":    days_since_publish,
+            "first_impression_date": first_impression_date,
+            "first_click_date":      first_click_date,
+            "current_impressions":   cur["impressions"],
+            "current_clicks":        cur["clicks"],
+            "current_position":      cur["position"],
+            "status":                status,
         })
     return out
 
@@ -838,16 +1156,36 @@ def detect_aio_anomalies(qdf: pd.DataFrame, min_impr: int = 100, top_n: int = 10
     return top[["query", "impressions", "clicks", "ctr", "position", "aio"]].to_dict("records")
 
 
-def aio_competitor_ranking(gaio: list[dict]) -> tuple[list[dict], int]:
-    """AIOに引用された企業をAIシェア順にランキング化する（TCD含む）。
+COMPETITOR_ENTITY_TYPES = ("branding_company", "consulting_company")
+
+
+def is_competitor_entity(entity_type: str) -> bool:
+    """ブランディング会社・コンサル会社など、コンテンツ戦略上の「競合」とみなすentity_typeか。"""
+    return entity_type in COMPETITOR_ENTITY_TYPES
+
+
+def aio_competitor_ranking(gaio: list[dict], entity_types: dict | None = None) -> tuple[list[dict], int]:
+    """AIOに引用された企業をドメイン単位でAIO登場率順にランキング化する（TCD含む）。
+
+    集計キーは正規化済みドメイン。URLが取得できずドメインを解決できない参照は、
+    表示名（会社名）ごとに別エンティティとして集計するが、出力のdomainフィールドは
+    空欄のままにする（会社名をdomain列へ代入しない）。
+    Google検索・Google自身のドメインは競合ランキングから除外する
+    （AIO登場率の定義上「競合」ではないため）。
+
+    AIO登場率 = そのドメインが引用されたAIO件数 ÷ AIO表示クエリ数。
+    1つのAIOに複数ドメインが引用され得るため、合計は100%にならない。
     Returns (ranking_list, total_aio_count)
     """
+    entity_types = entity_types or {}
     total_aio = sum(1 for r in gaio if r.get("aio_exists"))
     if total_aio == 0:
         return [], 0
 
     counts: dict[str, int] = {}
     kw_map: dict[str, list[str]] = {}
+    display_names: dict[str, dict[str, int]] = {}
+    domain_by_key: dict[str, str] = {}
     tcd_count = 0
     tcd_kws: list[str] = []
     for r in gaio:
@@ -858,21 +1196,53 @@ def aio_competitor_ranking(gaio: list[dict]) -> tuple[list[dict], int]:
             tcd_count += 1
             if q and q not in tcd_kws:
                 tcd_kws.append(q)
-        for domain in r.get("cited_domains", []):
-            if "tcd" not in domain.lower():
-                counts[domain] = counts.get(domain, 0) + 1
-                if q and q not in kw_map.get(domain, []):
-                    kw_map.setdefault(domain, []).append(q)
+        domains = r.get("cited_domains", [])
+        names = r.get("cited_display_names", [])
+        for i, domain in enumerate(domains):
+            name = names[i] if i < len(names) else (domain or "")
+            # domainが解決できていない参照（Google内部ビューアリンク等）はsource名が"Google"になるため、
+            # domain単体でのGoogle判定だけでなくname側もチェックしないと素通りしてしまう。
+            if (domain and ("tcd" in domain.lower() or is_google_domain(domain))) or (not domain and is_google_domain(name)):
+                continue
+            if not domain and not name:
+                continue
+            # domainを解決できない参照は表示名単位で別エンティティとして扱う
+            # （domain欄は空欄のまま。会社名を代入しない）
+            key = domain if domain else f"__unresolved__:{_normalize_query(name)}"
+            domain_by_key[key] = domain
+            counts[key] = counts.get(key, 0) + 1
+            if q and q not in kw_map.get(key, []):
+                kw_map.setdefault(key, []).append(q)
+            display_names.setdefault(key, {})
+            display_names[key][name] = display_names[key].get(name, 0) + 1
+
+    def _best_display_name(key: str) -> str:
+        names = display_names.get(key)
+        if not names:
+            return domain_by_key.get(key, key)
+        return max(names.items(), key=lambda kv: kv[1])[0]
 
     ranking = sorted(
-        [{"name": k, "count": v, "share": round(v / total_aio * 100, 1),
-          "keywords": kw_map.get(k, [])}
+        [{
+            "domain": domain_by_key.get(k, ""),
+            "name": _best_display_name(k),
+            "display_name": _best_display_name(k),
+            "entity_type": entity_types.get(domain_by_key.get(k, ""), "unknown") if domain_by_key.get(k) else "unknown",
+            "count": v,
+            "appearance_rate": round(v / total_aio * 100, 1),
+            "share": round(v / total_aio * 100, 1),  # 後方互換フィールド
+            "keywords": kw_map.get(k, []),
+        }
          for k, v in counts.items()],
         key=lambda x: -x["count"]
     )
     ranking.append({
+        "domain": "tcd.jp",
         "name": "TCD（自社）",
+        "display_name": "TCD（自社）",
+        "entity_type": "branding_company",
         "count": tcd_count,
+        "appearance_rate": round(tcd_count / total_aio * 100, 1),
         "share": round(tcd_count / total_aio * 100, 1),
         "keywords": tcd_kws,
         "is_tcd": True,
@@ -880,30 +1250,38 @@ def aio_competitor_ranking(gaio: list[dict]) -> tuple[list[dict], int]:
     return ranking, total_aio
 
 
+def split_ranking_by_entity_type(ranking: list[dict]) -> tuple[list[dict], list[dict]]:
+    """AIO競合ランキングを「競合（ブランディング/コンサル会社）」と「参考情報源（それ以外）」に分割する。
+    TCD自身は競合表に含める。"""
+    competitors = [r for r in ranking if r.get("is_tcd") or is_competitor_entity(r.get("entity_type", "unknown"))]
+    reference_sources = [r for r in ranking if not r.get("is_tcd") and not is_competitor_entity(r.get("entity_type", "unknown"))]
+    return competitors, reference_sources
+
+
 def gen_aio_competitor_hypothesis(ranking: list[dict], total_aio: int, period_label: str = "今週") -> str:
-    """AIO競合ランキングの仮説テキストを2〜3文で生成する。"""
+    """AIO競合ランキングの仮説テキストを2〜3文で生成する。
+    観測事実と仮説を分け、Googleの評価意図は断定しない（「可能性」「事例が見られる」を使う）。"""
     if not ranking or total_aio == 0:
         return ""
-    cited = [r for r in ranking if not r.get("is_tcd") and r["count"] > 0]
+    competitors, _ = split_ranking_by_entity_type(ranking)
+    cited = [r for r in competitors if not r.get("is_tcd") and r["count"] > 0]
     tcd_entry = next((r for r in ranking if r.get("is_tcd")), None)
     parts = []
     if cited:
-        top_names = "・".join(r["name"] for r in cited[:2])
-        parts.append(
-            f"{top_names}は、ブランディング会社の比較・一覧コンテンツを保有しており、"
-            f"Googleが検索意図を一度で解決できるページとして評価しているとみられます。"
-        )
+        top_names = "・".join(r["display_name"] for r in cited[:2])
+        parts.append(f"{top_names}は比較・一覧コンテンツを保有している。")
     parts.append(
-        "AIOでは、定義・選び方・比較情報が整理されたページが引用されるケースが見られます。"
+        "AIOでは、比較・一覧・定義情報を1ページ内で整理したコンテンツが引用される事例が見られる。"
     )
     if tcd_entry and tcd_entry["count"] == 0:
         parts.append(
-            f"TCDは{period_label}引用0件。比較・一覧型コンテンツはAIO引用獲得に向けた有力な仮説の一つです。"
+            f"TCDは{period_label}引用0件。比較・一覧型コンテンツはAIO引用獲得に向けた有力な仮説の一つ。"
         )
     elif tcd_entry:
         parts.append(
-            f"TCDは{period_label}AIシェア{tcd_entry['share']:.0f}%を獲得。"
-            f"さらなる引用拡大には比較コンテンツの強化が有効です。"
+            f"TCDは{period_label}AIO登場率{tcd_entry['appearance_rate']:.0f}%を獲得"
+            f"（AIO表示{total_aio}件中{tcd_entry['count']}件で引用）。"
+            f"さらなる引用拡大には比較コンテンツの強化が有効と考えられる。"
         )
     return "".join(parts)
 
@@ -1042,11 +1420,35 @@ def compare_point_watch(
     return out
 
 
-def point_watch_aio_presence_rate(point_watch: list[dict]) -> float | None:
-    """定点観測キーワードのうち、AIOが表示されている割合を返す（0件ならNone）。"""
-    if not point_watch:
-        return None
-    return sum(1 for r in point_watch if r["aio_exists"]) / len(point_watch) * 100
+def _is_tcd_domain(domain: str) -> bool:
+    return "tcd" in (domain or "").lower()
+
+
+def build_aio_competitor_status(
+    gaio_current: list[dict],
+    gaio_previous: list[dict] | None,
+    queries: list[str],
+    domain_aliases: dict | None = None,
+) -> list[dict]:
+    """市場（クエリ）ごとに「今週誰が引用されたか」「前週比の新規・消失」「TCD状況」だけをまとめる。
+    URL一覧・SERP安定度等の詳細はここでは扱わない（レポート本文では冗長なため）。
+    compare_point_watch() のドメイン差分ロジックをそのまま再利用し、TCD自身は企業リストから除く。"""
+    pw = compare_point_watch(gaio_current, gaio_previous, queries, domain_aliases=domain_aliases)
+    cur_by_query = {r["query"]: r for r in gaio_current}
+
+    out = []
+    for row in pw:
+        cur = cur_by_query.get(row["query"], {})
+        out.append({
+            "query": row["query"],
+            "aio_exists": row["aio_exists"],
+            "tcd_cited": bool(cur.get("tcd_cited")),
+            "cited_companies": [d for d in row["cited_domains"] if d and not _is_tcd_domain(d)],
+            "new_companies": [d for d in row["new_domains"] if d and not _is_tcd_domain(d)],
+            "lost_companies": [d for d in row["lost_domains"] if d and not _is_tcd_domain(d)],
+            "has_previous": row["has_previous"],
+        })
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1063,8 +1465,10 @@ def fpos(p: float) -> str:
     return f"{float(p):.1f}"
 
 def fchg(c: float | None) -> str:
+    """None（前期実績0のため比較不能）は「NEW」と表示すると新規公開と誤解されるため、
+    比較不能を意味する「—」に統一する（新規公開の判定はindex_monitoringで別途行う）。"""
     if c is None:
-        return "NEW"
+        return "—"
     return f"+{c:.1f}%" if c > 0 else f"{c:.1f}%"
 
 def fpos_chg(c: float) -> str:
@@ -1074,6 +1478,19 @@ def fpos_chg(c: float) -> str:
 
 def fctr_chg(c: float) -> str:
     return f"+{c * 100:.2f}pp" if c >= 0 else f"{c * 100:.2f}pp"
+
+def pos_trend_label(pos_d: float) -> str:
+    """SC平均順位の変化を3段階（横ばい/小幅/明確）で分類する。
+    pos_d は cur - prv（プラス=順位低下、マイナス=順位改善）。
+    0.3未満=横ばい、0.3〜1.0未満=小幅、1.0以上=明確、という閾値は
+    順位1桁の変動をノイズと誤解しないための基準。"""
+    a = abs(pos_d)
+    if a < 0.3:
+        return "横ばい"
+    direction = "低下" if pos_d > 0 else "改善"
+    magnitude = "明確な" if a >= 1.0 else "小幅"
+    return f"{magnitude}{direction}"
+
 
 def pos_arrow(c: float) -> str:
     if c < -0.5:
@@ -1098,6 +1515,7 @@ def _calc_insights(data: dict) -> tuple[list[str], list[str], list[str]]:
     """インサイトを (good, bad, next_check) のリストで返す。**bold** 記法を含む。"""
     tc = data["totals"]["current"]
     tp = data["totals"]["previous"]
+    cmp_label = "前週比" if data.get("period_type") == "weekly" else "前月比"
     good: list[str] = []
     bad: list[str] = []
     next_check: list[str] = []
@@ -1105,15 +1523,15 @@ def _calc_insights(data: dict) -> tuple[list[str], list[str], list[str]]:
     cc = pct_chg(tc["clicks"], tp["clicks"])
     if cc is not None:
         if cc > 5:
-            good.append(f"総クリック数が前月比 **{cc:.1f}% 増加**")
+            good.append(f"総クリック数が{cmp_label} **{cc:.1f}% 増加**")
         elif cc < -5:
-            bad.append(f"総クリック数が前月比 **{abs(cc):.1f}% 減少**")
+            bad.append(f"総クリック数が{cmp_label} **{abs(cc):.1f}% 減少**")
 
     pos_d = tc["position"] - tp["position"]
-    if pos_d < -0.5:
-        good.append(f"平均掲載順位が **{abs(pos_d):.1f}位改善**（{tp['position']:.1f} → {tc['position']:.1f}）")
-    elif pos_d > 0.5:
-        bad.append(f"平均掲載順位が **{pos_d:.1f}位低下**（{tp['position']:.1f} → {tc['position']:.1f}）")
+    if pos_d < -0.3:
+        good.append(f"平均掲載順位が **{pos_trend_label(pos_d)}**（{abs(pos_d):.1f}位、{tp['position']:.1f} → {tc['position']:.1f}）")
+    elif pos_d > 0.3:
+        bad.append(f"平均掲載順位が **{pos_trend_label(pos_d)}**（{pos_d:.1f}位、{tp['position']:.1f} → {tc['position']:.1f}）")
 
     ctr_d = tc["ctr"] - tp["ctr"]
     if ctr_d > 0.005:
@@ -1140,9 +1558,15 @@ def _calc_insights(data: dict) -> tuple[list[str], list[str], list[str]]:
         if r["click_chg"] is not None and r["click_chg"] > 20:
             good.append(f"重点KW「**{r['query']}**」クリック {r['click_chg']:.0f}% 増")
         if r["pos_chg"] < -1:
-            good.append(f"重点KW「**{r['query']}**」順位 {abs(r['pos_chg']):.1f}位改善")
+            good.append(
+                f"重点KW「**{r['query']}**」順位 {r['prv']['position']:.1f}位 → {r['cur']['position']:.1f}位"
+                f"（{abs(r['pos_chg']):.1f}位改善）"
+            )
         if r["pos_chg"] > 3:
-            bad.append(f"重点KW「**{r['query']}**」順位 {r['pos_chg']:.1f}位変化")
+            bad.append(
+                f"重点KW「**{r['query']}**」順位 {r['prv']['position']:.1f}位 → {r['cur']['position']:.1f}位"
+                f"（{r['pos_chg']:.1f}位低下）"
+            )
             next_check.append(f"「{r['query']}」のコンテンツ・被リンク状況を確認")
 
     for r in data.get("lp_pages", []):
@@ -1165,47 +1589,91 @@ def _calc_insights(data: dict) -> tuple[list[str], list[str], list[str]]:
 # ────────────────────────────────────────────────────────────────────
 
 def gen_ai_insights_rule_based(data: dict) -> list[str]:
-    """Search Console と AIO を横断し、変化の背景仮説を閾値判定で生成する。"""
+    """Search Console と AIO を横断し、変化の背景仮説を閾値判定で生成する。
+    競合の出現・消失や市場単位の存在感変化を優先的に扱い、サイト全体指標の診断はその後に続ける。"""
     tc = data["totals"]["current"]
     tp = data["totals"]["previous"]
     insights: list[str] = []
+
+    # 市場・競合視点の診断（市場存在感サマリー・AIO市場変化データを横断して評価する）
+    mps = data.get("market_presence_summary", [])
+    if mps:
+        competitor_only = [m for m in mps if m["aio"]["competitor_cited"] and not m["aio"]["tcd_cited"]]
+        if competitor_only:
+            names = "・".join(f'「{m["market"]}」' for m in competitor_only[:3])
+            insights.append(
+                f"AIO上では、対象6市場中{len(competitor_only)}市場（{names}等）で競合のみが引用され、TCD未引用の状態が続いている。"
+            )
+        declining = [m for m in mps if m["overall"] == "down"]
+        if declining:
+            names = "・".join(f'「{m["market"]}」' for m in declining[:3])
+            insights.append(f"{names} で市場存在感が低下方向。優先的な確認が必要。")
+
+    ct = data.get("citation_trends", {})
+    emerging = ct.get("emerging_players", [])
+    disappeared = ct.get("disappeared_players", [])
+    if emerging:
+        names = "・".join(r["domain"] for r in emerging[:3])
+        insights.append(
+            f"AIO引用元に{names}など{len(emerging)}社が新規に加わった。競合側のコンテンツ更新・SERP変動の可能性がある。"
+        )
+    if disappeared:
+        names = "・".join(r["domain"] for r in disappeared[:3])
+        insights.append(
+            f"前週まで引用されていた{names}など{len(disappeared)}社の引用が消失。SERP構成が流動的な可能性がある。"
+        )
 
     imp_chg   = pct_chg(tc["impressions"], tp["impressions"])
     click_chg = pct_chg(tc["clicks"], tp["clicks"])
     pos_d     = tc["position"] - tp["position"]
     ctr_d     = tc["ctr"] - tp["ctr"]
 
-    # クリック変化の主因診断（検索需要 vs 順位 vs CTR）
+    # クリック変化の要因診断（検索需要 vs 順位 vs CTR）
+    # 注: Search Consoleの数値だけでは「検索需要そのものの減少」と
+    # 「表示対象クエリ構成の変化」「SERP要素の変化」「AIOによるゼロクリック化」を
+    # 切り分けられないため、"主因は〜である" と断定せず、事実（fact）と
+    # 仮説（hypothesis）を分けて記述する。
     if click_chg is not None:
         if click_chg < -5:
             if imp_chg is not None and imp_chg < -5 and abs(imp_chg) >= abs(pos_d) * 2:
                 insights.append(
-                    f"クリック減（{fchg(click_chg)}）の主因は検索需要（Impression）減少（{fchg(imp_chg)}）であり、"
-                    "順位・CTRの悪化ではない可能性が高い。"
+                    f"[事実] クリック減（{fchg(click_chg)}）にはImpression減少（{fchg(imp_chg)}）の影響が大きい。"
+                    "[仮説] ただし検索需要そのものの減少、表示対象クエリ構成の変化、SERP要素の変化、"
+                    "AIOによるゼロクリック化の影響は現時点では分離できない。"
                 )
-            elif pos_d > 0.5:
-                insights.append(f"クリック減（{fchg(click_chg)}）は平均順位の低下（{fpos_chg(pos_d)}）が主因と考えられる。")
+            elif pos_d > 0.3:
+                insights.append(
+                    f"[事実] クリック減（{fchg(click_chg)}）と同時に平均順位が{pos_trend_label(pos_d)}"
+                    f"（{fpos_chg(pos_d)}）している。[仮説] 順位低下がクリック減に寄与している可能性がある。"
+                )
             elif ctr_d < -0.005:
                 insights.append(
-                    f"クリック減（{fchg(click_chg)}）はCTR低下（{ctr_d*100:.2f}pp）が主因と考えられる。"
-                    "SERP表示（AI Overviewなど）の変化を確認したい。"
+                    f"[事実] クリック減（{fchg(click_chg)}）と同時にCTRが{ctr_d*100:.2f}pp低下している。"
+                    "[仮説] SERP表示（AI Overviewなど）の変化がCTR低下に影響した可能性があり、確認したい。"
                 )
             else:
-                insights.append(f"クリック減（{fchg(click_chg)}）の主因は特定の指標に集約できず、複合的な要因の可能性がある。")
+                insights.append(f"[事実] クリック減（{fchg(click_chg)}）が発生しているが、単一指標には集約できず、複合的な要因の可能性がある。")
         elif click_chg > 5:
-            if pos_d < -0.5:
-                insights.append(f"クリック増（{fchg(click_chg)}）は順位改善（{fpos_chg(pos_d)}）が寄与している。")
+            if pos_d < -0.3:
+                insights.append(f"[事実] クリック増（{fchg(click_chg)}）と同時に平均順位が{pos_trend_label(pos_d)}している。[仮説] 順位改善が寄与している可能性がある。")
             elif imp_chg is not None and imp_chg > 5:
-                insights.append(f"クリック増（{fchg(click_chg)}）は検索需要（Impression）の増加（{fchg(imp_chg)}）が寄与している。")
+                insights.append(f"[事実] クリック増（{fchg(click_chg)}）と同時にImpressionも{fchg(imp_chg)}増加している。[仮説] 検索需要の増加が寄与している可能性がある。")
 
     # AIO状況の変化診断（日次モニターデータを優先、なければ定点観測にフォールバック）
+    # 観測日数が少ないうちは「安定している」と断定しない
+    #（observed_days<3: 判定不可 / 3〜6: 暫定 / 7以上: 週次判定）
     aio_summary = data.get("aio_daily_summary", {})
     if aio_summary and aio_summary.get("aio_query_count", 0) > 0:
-        if aio_summary["aio_text_changed_count"] == 0:
-            insights.append("観測期間中、AIO本文の変化は検出されず、SERP上のAIO表示は安定している。")
+        observed_days = aio_summary.get("observed_days", 0)
+        changed_count = aio_summary["aio_text_changed_count"]
+        if observed_days < AIO_DAILY_MIN_REFERENCE_DAYS:
+            insights.append(f"観測{observed_days}日分のため、AIO本文および表示の安定性はまだ判定できない。")
+        elif changed_count == 0:
+            prefix = "" if aio_summary.get("supports_weekly_comparison") else "暫定的に、"
+            insights.append(f"{prefix}観測期間中、AIO本文の変化は検出されていない。")
         else:
             insights.append(
-                f"観測クエリのうち{aio_summary['aio_text_changed_count']}件でAIO本文の変化を検出。SERP構成が流動的な状態。"
+                f"観測クエリのうち{changed_count}件でAIO本文の変化を検出。SERP構成が流動的な可能性がある。"
             )
     else:
         pw = data.get("point_watch", [])
@@ -1217,7 +1685,7 @@ def gen_ai_insights_rule_based(data: dict) -> list[str]:
                 qs = "、".join(f'「{r["query"]}」' for r in changed[:2])
                 insights.append(f"{qs} でAIOの表示状況に変化あり。")
 
-    # Definition記事の伸長診断
+    # Definition記事の伸長診断（絶対増加数を必ず併記。前週母数が小さい場合はその旨を明記）
     growing_def = sorted(
         [
             r for r in data.get("def_pages", [])
@@ -1229,13 +1697,19 @@ def gen_ai_insights_rule_based(data: dict) -> list[str]:
     )
     if growing_def:
         top = growing_def[0]
-        chg = pct_chg(top["cur"]["impressions"], top["prv"]["impressions"])
-        insights.append(f"マガジン系「{top['name']}」のImpressionが{fchg(chg)}と伸長しており、コンテンツが検索需要を捉え始めている。")
+        prv_imp = top["prv"]["impressions"]
+        cur_imp = top["cur"]["impressions"]
+        chg = pct_chg(cur_imp, prv_imp)
+        small_base = " 前週母数は小さいが、" if prv_imp < 20 else " "
+        insights.append(
+            f"マガジン系「{top['name']}」は{fi(prv_imp)} → {fi(cur_imp)} Impressionへ増加"
+            f"（+{fi(cur_imp - prv_imp)}、{fchg(chg)}）。{small_base}露出が拡大している。"
+        )
 
     if not insights:
         insights.append("今期は指標間で明確な因果関係は検出されず、大きな変化のない安定期と考えられる。")
 
-    return insights[:5]
+    return insights[:6]
 
 
 def gen_ai_insights(data: dict) -> list[str]:
@@ -1243,28 +1717,137 @@ def gen_ai_insights(data: dict) -> list[str]:
     return gen_ai_insights_rule_based(data)
 
 
-def gen_action_items_rule_based(data: dict) -> list[str]:
-    """来週やるべき実務タスクを閾値判定で抽出する。"""
-    actions: list[str] = []
+def _review_date(weeks: int) -> str:
+    return (datetime.today() + timedelta(weeks=weeks)).strftime("%Y-%m-%d")
+
+
+_SIGNAL_LABEL_JA = {
+    "impressions_increase": "Impression増加",
+    "position_improvement": "順位改善",
+    "tcd_aio_citation": "TCDのAIO引用",
+    "ctr_recovery": "CTR回復",
+    "top20_entry": "上位20位以内到達",
+}
+
+
+def _signal_label(code: str) -> str:
+    return _SIGNAL_LABEL_JA.get(code, code)
+
+
+def _action_item(priority: int, title: str, evidence: str, target: str, content_type: str, action: str,
+                  expected_signal: list[str], review_weeks: int = 4) -> dict:
+    """priority/title/evidence/target/content_type/action/expected_signal/review_date を構造化して返す。
+    Markdown版は入れ子箇条書き、HTML版はカードレイアウトへそれぞれ整形する
+    （1行に詰め込むと可読性が下がるため、文字列ではなくdictで保持する）。
+    expected_signalは内部コード（例: tcd_aio_citation）を日本語ラベルへ変換して表示する。"""
+    return {
+        "priority": priority,
+        "title": title,
+        "evidence": evidence,
+        "target": target,
+        "content_type": content_type,
+        "action": action,
+        "expected_signal": [_signal_label(s) for s in expected_signal],
+        "review_date": _review_date(review_weeks),
+        "review_weeks": review_weeks,
+    }
+
+
+def _action_items_md(actions: list[dict]) -> str:
+    """Action Itemsを入れ子箇条書きで整形する（1行への詰め込みを避ける）。"""
+    lines = []
+    for a in actions:
+        lines.append(f'- **[優先度{a["priority"]}] {a["title"]}**')
+        lines.append(f'  - 根拠: {a["evidence"]}')
+        lines.append(f'  - 対象: {a["target"]}（{a["content_type"]}）')
+        lines.append(f'  - 施策: {a["action"]}')
+        signal_txt = "・".join(a["expected_signal"]) if a["expected_signal"] else "-"
+        lines.append(f'  - 期待シグナル: {signal_txt}')
+        lines.append(f'  - 確認日: {a["review_date"]}（{a["review_weeks"]}週間後）')
+    return "\n".join(lines) + "\n"
+
+
+# suggested_action（compute_aio_opportunityの短いラベル）を、実務担当者が着手できる具体的な
+# ページ企画指示へ展開するマッピング。「検討する」で終わらせず、含めるべき要素まで明示する。
+_AIO_OPPORTUNITY_CONCRETE_ACTION = {
+    "比較表追加": "比較観点・会社タイプ・相談前チェックリスト・FAQ・関連Definitionリンクを含む比較ページ企画を作成する。",
+    "title・description見直し": "title・meta descriptionを検索意図（比較・選び方）に即した文言へ書き換える。",
+    "FAQ追加": "想定質問と回答を明示したFAQセクションをページ内に追加する。",
+    "SERP動向を継続監視（AIOが未表示のため引用機会自体が未発生）": "AIO表示の有無を継続監視し、AIOが表示され始めたタイミングで比較コンテンツを追加投入する。",
+}
+
+
+def gen_action_items_rule_based(data: dict) -> list[dict]:
+    """来週やるべき実務タスクを、タイトル・根拠・対象・具体的施策・期待シグナル・確認日つきで抽出する。
+    戻り値は構造化dictのリスト（レンダリングはMarkdown/HTMLそれぞれの専用関数で行う）。"""
+    actions: list[dict] = []
     tc = data["totals"]["current"]
     tp = data["totals"]["previous"]
+    priority = 1
+
+    # 新規/更新ページの追跡（実施済み施策・公開済みページを認識してAction化）
+    idx_mon = data.get("index_monitoring", [])
+    gaining = [p for p in idx_mon if p["status"] in ("gaining_impressions", "gaining_clicks")]
+    for p in gaining[:2]:
+        evidence = (
+            f'「{p["page_title"]}」は公開から{p.get("days_since_publish", "-")}日で '
+            f'Impression {fi(p["current_impressions"])}件・Click {fi(p["current_clicks"])}件を記録。'
+        )
+        actions.append(_action_item(
+            priority, f'「{p["page_title"]}」の追跡強化',
+            evidence, p["url"], "公開済みページ",
+            "インデックス状況・順位・AIO引用有無を週次で記録し、関連Definition記事から内部リンクを追加する。",
+            ["impressions_increase", "position_improvement", "tcd_aio_citation"],
+        ))
+        priority += 1
 
     ctr_d = tc["ctr"] - tp["ctr"]
     if ctr_d < -0.005:
-        actions.append("CTR低下の要因確認: 該当クエリのSERPを確認し、AI Overview・強調スニペット等の影響有無を切り分ける。")
+        actions.append(_action_item(
+            priority, "CTR低下要因の切り分け",
+            f"CTRが{ctr_d*100:.2f}pp低下（{fp(tp['ctr'])} → {fp(tc['ctr'])}）。",
+            "サイト全体", "SERP表示要素",
+            "Impression上位クエリのSERPを目視確認し、AI Overview・強調スニペットの表示有無で影響を切り分ける。",
+            ["ctr_recovery"], review_weeks=2,
+        ))
+        priority += 1
 
     opp = data.get("aio_opportunity", [])
     if opp:
         top = opp[0]
-        actions.append(f"AIO対策: 「{top['keyword']}」はAIO未引用のため、Definition記事の追加・強化を検討する。")
-
-    ranking, _ = aio_competitor_ranking(data.get("google_aio", []))
-    top_competitor = next((r for r in ranking if not r.get("is_tcd") and r["count"] > 0), None)
-    if top_competitor:
-        actions.append(
-            f"競合対策: 「{top_competitor['name']}」がAIOで多く引用されている。"
-            "比較記事など独自性の強いコンテンツの作成を検討する。"
+        concrete = _AIO_OPPORTUNITY_CONCRETE_ACTION.get(
+            top.get("suggested_action", ""), "Definition記事を新規作成し、比較・選び方の観点を追加する。"
         )
+        actions.append(_action_item(
+            priority, f'「{top["keyword"]}」のAIO引用獲得',
+            f'「{top["keyword"]}」はAIO未引用（Imp {fi(top.get("impressions", 0))}件・順位{fpos(top.get("position", 0))}位）。',
+            top["keyword"], "比較・選び方ページ",
+            concrete,
+            ["tcd_aio_citation", "impressions_increase"],
+        ))
+        priority += 1
+
+    # 競合対策: ブランディング/コンサル会社に限定し、銀行・行政・メディア等は対象にしない
+    ranking, _ = aio_competitor_ranking(data.get("google_aio", []), entity_types=data.get("domain_entity_types", {}))
+    competitors, _ref_sources = split_ranking_by_entity_type(ranking)
+    top_competitor = next((r for r in competitors if not r.get("is_tcd") and r["count"] > 0), None)
+    if top_competitor:
+        cited_queries = top_competitor.get("keywords", [])
+        target_query = cited_queries[0] if cited_queries else "（対象クエリ不明）"
+        domain_txt = top_competitor["domain"] or "ドメイン未解決"
+        # count（引用回数の合計）は複数市場にまたがる合算値であり、target_query1件分の引用数ではない。
+        # 「{target_query}のAIOでN件引用」のように単一クエリの数値であるかのような表現にしないよう分けて記述する。
+        queries_txt = "・".join(f'「{k}」' for k in cited_queries[:6])
+        actions.append(_action_item(
+            priority, f'競合「{top_competitor["display_name"]}」への対抗コンテンツ',
+            f'「{top_competitor["display_name"]}」（{domain_txt}）は観測6市場中{len(cited_queries)}市場'
+            f'（{queries_txt}）でAIOに引用されている（引用回数計{top_competitor["count"]}件、'
+            f'AIO登場率{top_competitor["appearance_rate"]:.0f}%）。',
+            target_query, "比較・選び方ページ",
+            "比較観点・会社タイプ・相談前チェックリスト・FAQ・関連Definitionリンクを含むページ企画を作成する。",
+            ["tcd_aio_citation"],
+        ))
+        priority += 1
 
     dropping = sorted(
         [r for r in data.get("key_kws", []) if r["prv"]["impressions"] > 0 and r["pos_chg"] > 3],
@@ -1272,33 +1855,70 @@ def gen_action_items_rule_based(data: dict) -> list[str]:
     )
     if dropping:
         top = dropping[0]
-        actions.append(f"SERP確認: 重点KW「{top['query']}」の順位が{top['pos_chg']:.1f}位低下。競合ページ・SERP構成の変化を確認する。")
+        actions.append(_action_item(
+            priority, f'重点KW「{top["query"]}」の順位低下要因確認',
+            f'重点KW「{top["query"]}」の順位が{top["prv"]["position"]:.1f}位 → {top["cur"]["position"]:.1f}位'
+            f'（{top["pos_chg"]:.1f}位低下）。',
+            top["query"], "重点キーワードページ",
+            "上位10件の見出し構成・コンテンツ形式（比較表・FAQ有無等）を比較し、SERP構成の変化点を洗い出す。",
+            ["position_improvement"], review_weeks=2,
+        ))
+        priority += 1
 
     growing_def = [
         r for r in data.get("def_pages", [])
         if r["prv"]["impressions"] > 0 and r["click_chg"] is not None and r["click_chg"] > 20
     ]
     if growing_def:
-        actions.append(f"横展開: マガジン系「{growing_def[0]['name']}」が伸長中。関連テーマの記事追加を検討する。")
+        top = growing_def[0]
+        actions.append(_action_item(
+            priority, f'「{top["name"]}」の伸長を横展開',
+            f'マガジン系「{top["name"]}」のクリックが{top["click_chg"]:.0f}%伸長。',
+            top["url"], "関連マガジン記事",
+            f'「{top["name"]}」と関連性の高いテーマで新規記事を1本企画し、相互内部リンクを設置する。',
+            ["impressions_increase"],
+        ))
+        priority += 1
+
+    # 重複削減: 同一対象（target）に対して複数の施策が生成された場合、
+    # 最初に生成された（＝優先度の高い）ものだけを残し、優先度を振り直す。
+    seen_targets: set[str] = set()
+    deduped: list[dict] = []
+    for a in actions:
+        key = _normalize_query(a["target"])
+        if key in seen_targets:
+            continue
+        seen_targets.add(key)
+        deduped.append(a)
+    for i, a in enumerate(deduped, start=1):
+        a["priority"] = i
+    actions = deduped
 
     if not actions:
-        actions.append("大きな変化は検出されず。既存監視を継続し、特別なアクションは不要。")
+        actions.append(_action_item(
+            1, "現状維持", "大きな変化は検出されなかった。",
+            "サイト全体", "モニタリング",
+            "既存監視を継続し、特別なアクションは行わない。",
+            [], review_weeks=1,
+        ))
 
     return actions[:5]
 
 
-def gen_action_items(data: dict) -> list[str]:
+def gen_action_items(data: dict) -> list[dict]:
     """Action Items セクション本文。現状はルールベース実装のみを使用する。"""
     return gen_action_items_rule_based(data)
 
 
 def gen_insights(data: dict) -> str:
     good, bad, next_check = _calc_insights(data)
+    cmp_label = "前週比" if data.get("period_type") == "weekly" else "前月比"
+    next_label = "次週確認ポイント・改善推奨" if data.get("period_type") == "weekly" else "次月確認ポイント・改善推奨"
     lines: list[str] = ["### 伸びた項目"]
-    lines += [f"- ✅ {g}" for g in good] if good else ["- 前月比で明確な改善項目は検出されませんでした。"]
+    lines += [f"- ✅ {g}" for g in good] if good else [f"- {cmp_label}で明確な改善項目は検出されませんでした。"]
     lines += ["", "### 落ちた項目"]
-    lines += [f"- ⚠️ {b}" for b in bad] if bad else ["- 前月比で明確な悪化項目は検出されませんでした。"]
-    lines += ["", "### 次月確認ポイント"]
+    lines += [f"- ⚠️ {b}" for b in bad] if bad else [f"- {cmp_label}で明確な悪化項目は検出されませんでした。"]
+    lines += ["", f"### {next_label}"]
     if not next_check:
         next_check.append("引き続きデータ蓄積を継続。特段の急変がなければ現状維持で問題なし。")
     lines += [f"- {n}" for n in next_check]
@@ -1310,12 +1930,30 @@ def gen_insights(data: dict) -> str:
 # ────────────────────────────────────────────────────────────────────
 
 def gen_executive_summary(data: dict) -> list[str]:
-    """経営層が最初の30秒で状況を把握できるよう、検索需要・順位・CTR・AIO状況・結論の
-    5項目に絞った要約を返す。結論のみ gen_ai_insights() の仮説を採用する（他は事実ベース）。"""
+    """経営層が最初の30秒で状況を把握できるよう、市場存在感・検索需要・順位・CTR・AIO状況・結論の
+    6項目に絞った要約を返す。結論のみ gen_ai_insights() の仮説を採用する（他は事実ベース）。
+    Search Console単体の数値報告ではなく、市場での存在感の変化を先頭に置く。"""
     tc = data["totals"]["current"]
     tp = data["totals"]["previous"]
     period_label = "今週" if data.get("period_type") == "weekly" else "今月"
     items: list[str] = []
+
+    # 0. 市場存在感（事実。6市場の方向性サマリー。存在しない場合はスキップ）
+    mps = data.get("market_presence_summary", [])
+    if mps:
+        up_n = sum(1 for m in mps if m["overall"] == "up")
+        down_n = sum(1 for m in mps if m["overall"] == "down")
+        hold_n = len(mps) - up_n - down_n
+        high_priority = [m for m in mps if m["market_priority"] == "高"]
+        if high_priority:
+            top = high_priority[0]
+            focus_txt = f"市場機会が最も大きいのは「{top['market']}」（{top['comment']}）"
+        else:
+            top = mps[0]
+            focus_txt = f"注目市場は「{top['market']}」（{top['comment']}）"
+        items.append(
+            f"**市場存在感**: 対象6市場中、上昇{up_n}件・横ばい{hold_n}件・低下{down_n}件。{focus_txt}。"
+        )
 
     # 1. 検索需要変化（Impression、事実）
     imp_chg = pct_chg(tc["impressions"], tp["impressions"])
@@ -1330,7 +1968,7 @@ def gen_executive_summary(data: dict) -> list[str]:
     # 2. 順位変化（事実）
     pos_d = tc["position"] - tp["position"]
     if tp["position"] > 0:
-        trend = "改善" if pos_d < -0.5 else ("低下" if pos_d > 0.5 else "横ばい")
+        trend = pos_trend_label(pos_d)
         items.append(f"**順位変化**: 平均掲載順位 {fpos(tc['position'])}位（{fpos_chg(pos_d)}、{trend}）。")
     else:
         items.append(f"**順位変化**: 平均掲載順位 {fpos(tc['position'])}位（初期観測フェーズのため前期比なし）。")
@@ -1343,41 +1981,154 @@ def gen_executive_summary(data: dict) -> list[str]:
     else:
         items.append(f"**CTR変化**: CTR {fp(tc['ctr'])}（初期観測フェーズのため前期比なし）。")
 
-    # 4. AIO状況（事実。日次モニターデータがあれば優先し、なければ定点スナップショットにフォールバック）
-    aio_summary = data.get("aio_daily_summary", {})
-    if aio_summary and aio_summary.get("aio_query_count", 0) > 0:
-        rate     = aio_summary["aio_exists_rate"]
-        tcd_rate = aio_summary["tcd_cited_rate"]
-        items.append(
-            f"**AIO状況**: 観測{aio_summary['aio_query_count']}クエリ中 AIO表示率{rate*100:.0f}%、"
-            f"TCD引用率{tcd_rate*100:.0f}%（本文変更 {aio_summary['aio_text_changed_count']}件）。"
+    # 4. AIO状況（事実。週次AIOスナップショットと日次AIO推移は別データのため、両方を明示して併記する）
+    gaio = data.get("google_aio", [])
+    valid_gaio = [r for r in gaio if r.get("status") != "API_KEY_MISSING"]
+    if valid_gaio:
+        aio_shown_n = sum(1 for r in valid_gaio if r.get("aio_exists"))
+        tcd_cited_n = sum(1 for r in valid_gaio if r.get("tcd_cited"))
+        snapshot_txt = (
+            f"週次AIOスナップショットでは観測{len(valid_gaio)}クエリ中、"
+            f"AIO表示{aio_shown_n}件・TCD引用{tcd_cited_n}件。"
         )
     else:
-        gaio = data.get("google_aio", [])
-        ranking, total_aio = aio_competitor_ranking(gaio)
-        tcd_entry = next((r for r in ranking if r.get("is_tcd")), None)
-        if gaio and any(r.get("status") != "API_KEY_MISSING" for r in gaio):
-            if tcd_entry and total_aio > 0:
-                items.append(
-                    f"**AIO状況**: 観測AIO {total_aio}件中、TCD引用 {tcd_entry['count']}件"
-                    f"（シェア{tcd_entry['share']:.0f}%）。"
-                )
-            else:
-                items.append(f"**AIO状況**: {period_label}はAIOの表示自体が観測されず。")
+        snapshot_txt = "週次AIOスナップショットは未取得（SERPAPI_API_KEY未設定）。"
+
+    aio_summary = data.get("aio_daily_summary", {})
+    if aio_summary and aio_summary.get("aio_query_count", 0) > 0:
+        observed_days = aio_summary.get("observed_days", 0)
+        if observed_days == 0:
+            daily_txt = "日次AIO推移は今週分のデータが未取得のため、引用元の前週比較は判断保留。"
+        elif aio_summary.get("is_reference_only"):
+            daily_txt = f"日次AIO推移は観測{observed_days}日分のため参考値。"
         else:
-            items.append("**AIO状況**: 観測データなし（SERPAPI_API_KEY未設定、またはAIO日次モニター未実行）。")
+            daily_txt = f"日次AIO推移は観測{observed_days}日分（本文変更{aio_summary['aio_text_changed_count']}件）。"
+    else:
+        daily_txt = "日次AIO推移は未取得（aio_daily_monitor.py未実行）。"
 
-    # 5. 今週/月の結論（AI Insightsの最重要仮説を結論として提示）
-    insights = gen_ai_insights(data)
-    conclusion = insights[0] if insights else "特段の急変はなく、現状のモニタリングを継続。"
-    items.append(f"**{period_label}の結論**: {conclusion}")
+    items.append(f"**AIO状況**: {snapshot_txt}{daily_txt}")
 
-    return items[:5]
+    # 5. 結論（事実ベースの短い要約のみ。仮説はAI Insights側に譲り、文言を重複させない）
+    items.append(f"**{period_label}の結論**: {_gen_conclusion(data)}")
+
+    return items[:6]
+
+
+def _gen_conclusion(data: dict) -> str:
+    """Executive Summaryの結論行。市場存在感サマリーがあれば市場視点（どの市場が改善し、
+    AIO引用にどれだけ課題があるか）で述べる。データがない場合はサイト全体指標にフォールバックする。"""
+    mps = data.get("market_presence_summary", [])
+    if not mps:
+        return _gen_conclusion_site_wide(data)
+
+    parts: list[str] = []
+
+    improving = [m for m in mps if m["overall"] == "up"]
+    if improving:
+        names = "・".join(m["market"] for m in improving[:3])
+        parts.append(f"{names}でSEO順位が改善。")
+
+    declining = [m for m in mps if m["overall"] == "down"]
+    if declining:
+        names = "・".join(m["market"] for m in declining[:3])
+        parts.append(f"{names}で存在感が低下方向。")
+
+    if not improving and not declining:
+        parts.append("6市場とも大きな変化はなく横ばい。")
+
+    cited_n = sum(1 for m in mps if m["aio"]["tcd_cited"])
+    if cited_n == 0:
+        parts.append(f"一方、{len(mps)}市場すべてでTCDのAIO引用は未獲得。")
+    else:
+        parts.append(f"AIO引用は{len(mps)}市場中{cited_n}市場で獲得。")
+
+    high_priority = [m["market"] for m in mps if m["market_priority"] == "高"]
+    if high_priority:
+        names = "・".join(high_priority[:2])
+        parts.append(f"今週は{names}への対応を優先する。")
+
+    conclusion = "".join(parts)
+    if len(conclusion) > 150:
+        conclusion = conclusion[:149] + "…"
+    return conclusion
+
+
+def _gen_conclusion_site_wide(data: dict) -> str:
+    """市場存在感サマリー未設定時のフォールバック（旧・サイト全体指標ベースの結論）。"""
+    tc = data["totals"]["current"]
+    tp = data["totals"]["previous"]
+    parts: list[str] = []
+
+    imp_chg = pct_chg(tc["impressions"], tp["impressions"])
+    click_chg = pct_chg(tc["clicks"], tp["clicks"])
+    if imp_chg is not None and click_chg is not None:
+        same_dir_down = imp_chg < -5 and click_chg < -5
+        same_dir_up   = imp_chg > 5 and click_chg > 5
+        if same_dir_down:
+            parts.append(f"Impression減少（{fchg(imp_chg)}）に伴いクリック数も減少。")
+        elif same_dir_up:
+            parts.append(f"Impression増加（{fchg(imp_chg)}）に伴いクリック数も増加。")
+        else:
+            parts.append(f"Impressionは{fchg(imp_chg)}、クリックは{fchg(click_chg)}。")
+
+    pos_d = tc["position"] - tp["position"]
+    if tp["position"] > 0:
+        parts.append(f"平均順位は{pos_trend_label(pos_d)}（{abs(pos_d):.1f}位）。")
+
+    aio_summary = data.get("aio_daily_summary", {})
+    if aio_summary.get("is_reference_only"):
+        obs = aio_summary.get("observed_days", 0)
+        parts.append(f"AIO日次観測は{obs}日分のため参考値とし、")
+
+    idx_mon = data.get("index_monitoring", [])
+    gaining_names = [p["page_title"] for p in idx_mon if p["status"] in ("gaining_impressions", "gaining_clicks")]
+    growing_def_names = [
+        r["name"] for r in data.get("def_pages", [])
+        if r["prv"]["impressions"] > 0
+        and pct_chg(r["cur"]["impressions"], r["prv"]["impressions"]) is not None
+        and pct_chg(r["cur"]["impressions"], r["prv"]["impressions"]) > 20
+    ]
+    watch = growing_def_names[:1] + gaining_names[:1]
+    if watch:
+        parts.append(f"{'と'.join(watch)}の推移を継続確認する。")
+    else:
+        parts.append("大きな変化のない項目は現状のモニタリングを継続する。")
+
+    conclusion = "".join(parts)
+    if len(conclusion) > 130:
+        conclusion = conclusion[:129] + "…"
+    return conclusion
 
 
 # ────────────────────────────────────────────────────────────────────
 # Markdown レポート生成
 # ────────────────────────────────────────────────────────────────────
+
+_ENTITY_TYPE_LABEL_JA = {
+    "branding_company": "ブランディング会社", "consulting_company": "コンサル会社",
+    "client_company": "クライアント企業", "media": "メディア",
+    "public_institution": "公的機関", "financial_institution": "金融機関",
+    "platform": "プラットフォーム", "unknown": "不明",
+}
+
+
+def _ranking_table_md(items: list[dict]) -> str:
+    """AIO競合ランキング／参考情報源の共通テーブル。domain列には正規化済みホスト名のみを入れ、
+    解決できない場合は「-」を表示する（会社名を代入しない）。"""
+    if not items:
+        return ""
+    lines = [
+        "| 企業（表示名） | ドメイン | 種別 | 対象キーワード | AIO登場率 |",
+        "|---------------|---------|------|-------------|----------|",
+    ]
+    for item in items:
+        kw_txt = "、".join(item.get("keywords", [])) or "—"
+        share_txt = f'{item["count"]}件 ({item["appearance_rate"]:.0f}%)'
+        domain_txt = item.get("domain") or "-"
+        entity_label = _ENTITY_TYPE_LABEL_JA.get(item.get("entity_type", "unknown"), "不明")
+        lines.append(f"| {item['display_name']} | {domain_txt} | {entity_label} | {kw_txt} | {share_txt} |")
+    return "\n".join(lines) + "\n"
+
 
 def _kw_table_md(rows: list[dict]) -> str:
     if not rows:
@@ -1431,29 +2182,44 @@ def _aio_daily_summary_md(summary: dict) -> str:
         return "AIO日次データ未取得（data/aio/looker/aio_daily.csv が存在しないか、対象期間のデータがありません）。\n"
     rate     = summary["aio_exists_rate"]
     tcd_rate = summary["tcd_cited_rate"]
+    observed_days = summary.get("observed_days", 0)
+    expected_days = summary.get("expected_days", 0)
+    coverage_rate = summary.get("coverage_rate", 0.0)
     lines = [
+        f"- 観測日数: {observed_days} / {expected_days}日（カバレッジ {coverage_rate*100:.0f}%）",
         f"- 観測クエリ数: {summary['aio_query_count']}",
-        f"- AIO表示率: {rate*100:.0f}%" if rate is not None else "- AIO表示率: -",
-        f"- TCD引用率: {tcd_rate*100:.0f}%" if tcd_rate is not None else "- TCD引用率: -",
-        f"- AIO本文変更件数: {summary['aio_text_changed_count']}",
+        f"- AIO表示率: {rate*100:.0f}%（観測{observed_days}日分）" if rate is not None else "- AIO表示率: -",
+        f"- TCD引用率: {tcd_rate*100:.0f}%（観測{observed_days}日分）" if tcd_rate is not None else "- TCD引用率: -",
+        f"- 前回観測からの本文変更件数: {summary['aio_text_changed_count']}",
     ]
     if summary.get("error_count"):
         lines.append(f"- エラー件数: {summary['error_count']}")
+    if summary.get("is_reference_only"):
+        lines.append(
+            f"- ⚠️ 日次観測開始直後のため（観測{observed_days}日 < {AIO_DAILY_MIN_REFERENCE_DAYS}日）、"
+            "AIO表示率・引用率は参考値です。"
+        )
+    if not summary.get("supports_weekly_comparison"):
+        lines.append(
+            f"- 観測日数が{AIO_DAILY_MIN_COMPARISON_DAYS}日未満のため、AIO日次データの週次比較は行っていません。"
+        )
     return "\n".join(lines) + "\n"
 
 
 def _aio_query_daily_table_md(query_level: list[dict]) -> str:
+    """観測日数が少なくても、表示率・引用率へ毎行「（参考値）」は付けない
+    （表の直前に一度だけ注意書きを出す運用に統一。観測日数列は残す）。"""
     if not query_level:
         return "AIO日次データ未取得。\n"
     lines = [
-        "| クエリ | AIO表示日数 | AIO表示率 | TCD引用日数 | TCD言及日数 | 最新ステータス | 本文変更回数 |",
-        "|-------|-----------|----------|-----------|-----------|--------------|------------|",
+        "| クエリ | 観測日数 | AIO表示日数 | AIO表示率 | TCD引用日数 | TCD言及日数 | 最新ステータス | 本文変更回数 |",
+        "|-------|--------|-----------|----------|-----------|-----------|--------------|------------|",
     ]
     for r in query_level:
         rate   = f"{r['aio_exists_rate']*100:.0f}%" if r["aio_exists_rate"] is not None else "-"
         status = _AIO_DAILY_STATUS_LABEL_MD.get(r["latest_status"], r["latest_status"])
         lines.append(
-            f"| {r['query']} | {r['aio_exists_days']} | {rate} "
+            f"| {r['query']} | {r.get('observed_days', '-')} | {r['aio_exists_days']} | {rate} "
             f"| {r['tcd_cited_days']} | {r['tcd_mentioned_days']} "
             f"| {status} | {r['aio_text_changed_count']} |"
         )
@@ -1478,6 +2244,34 @@ def _aio_domain_trend_table_md(trend: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _citation_trends_player_table_md(rows: list[dict], label: str) -> list[str]:
+    if not rows:
+        return [f"**{label}**: 該当なし", ""]
+    out = [f"**{label}**", "", "| ドメイン | 引用回数 | 対象クエリ |", "|---|---|---|"]
+    for r in rows:
+        queries = "・".join(r["related_queries"][:3]) or "-"
+        out.append(f"| {r['domain']} | {r['cited_count']} | {queries} |")
+    out.append("")
+    return out
+
+
+def _citation_trends_md(ct: dict) -> str:
+    lines = ["**今週の変化サマリー**", ""]
+    for s in ct.get("trend_summary", []):
+        lines.append(f"- {s}")
+    if ct.get("entity_note"):
+        lines.append(f"- {ct['entity_note']}")
+    if ct.get("weekly_snapshot_note"):
+        lines.append(f"- {ct['weekly_snapshot_note']}")
+    lines.append("")
+    # 日次AIO推移データが未取得の週は、継続/新規/消失の3表を空欄で並べても情報がないため省略する
+    if not ct.get("no_current_observation"):
+        lines += _citation_trends_player_table_md(ct.get("stable_players", []), "継続引用（安定した存在感）")
+        lines += _citation_trends_player_table_md(ct.get("emerging_players", []), "新規引用（存在感が高まった可能性）")
+        lines += _citation_trends_player_table_md(ct.get("disappeared_players", []), "引用消失（前週から存在感が低下）")
+    return "\n".join(lines)
+
+
 def _aio_text_change_summary_md(changes: dict) -> str:
     if not changes or changes.get("changed_count", 0) == 0:
         return "対象期間中、AIO本文の変化は検出されませんでした。\n"
@@ -1487,6 +2281,181 @@ def _aio_text_change_summary_md(changes: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ────────────────────────────────────────────────────────────────────
+# AIO競合状況（Google AI Overview観測 + 定点SERP観測の統合版）
+# 「今週誰が引用されたか」「前週との差分」「TCD状況」のみを扱う。
+# URL一覧・AIO本文抜粋・SERP安定度等の詳細はレポート本文では扱わない。
+# ────────────────────────────────────────────────────────────────────
+
+def _aio_competitor_status_md(rows: list[dict]) -> str:
+    if not rows:
+        return "観測データなし（SERPAPI_API_KEY未設定、またはgoogle_aio.enabled=falseのため）。\n"
+    lines: list[str] = []
+    for r in rows:
+        lines.append(f"### {r['query']}")
+        lines.append("")
+        if not r["aio_exists"]:
+            lines.append("- AIOは表示されていません。")
+            lines.append("")
+            continue
+        cited = "・".join(r["cited_companies"]) or "なし"
+        lines.append(f"- 今週引用: {cited}")
+        if not r["has_previous"]:
+            lines.append("- 前週比: 初回観測")
+        else:
+            new_txt = "・".join(r["new_companies"]) or "なし"
+            lost_txt = "・".join(r["lost_companies"]) or "なし"
+            lines.append(f"- 前週比: 新規 {new_txt} ／ 消失 {lost_txt}")
+        lines.append(f"- TCD: {'引用あり' if r['tcd_cited'] else '未引用'}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ────────────────────────────────────────────────────────────────────
+# ページ単体クエリ分析（地域ページ判定・AIOハブ候補判定）
+# ────────────────────────────────────────────────────────────────────
+
+_PQ_REGIONAL_STATUS_LABEL = {
+    "confirmed": "地域ページとして認識済み",
+    "strengthening": "地域ページとして認識が強化中",
+    "weak": "地域認識は弱い（データ不足）",
+    "none": "地域クエリ未検出",
+}
+
+_PQ_AIO_HUB_STATUS_LABEL = {
+    "none": "一般語での表示なし",
+    "initial_signal": "AIOハブ化の初期兆候あり",
+    "growing": "AIOハブ候補として成長中",
+    "established": "AIOハブとして定着",
+}
+
+
+def _page_query_recommendations(analysis: dict) -> list[str]:
+    """評価結果に基づくルールベースの次アクション提案。"""
+    reg_status = analysis["regional"]["status"]
+    hub_status = analysis["aio_hub"]["status"]
+    label = analysis["label"]
+    recs: list[str] = []
+
+    if reg_status in ("weak", "none"):
+        recs.append(f"本文修正: 「{label}」内で大阪・関西の地名や地域特化ワードの言及を増やす余地があります。")
+    else:
+        recs.append("本文修正: 地域ページとしての認識は進んでいます。現状の構成を維持しつつ、地域クエリの継続監視を推奨します。")
+
+    if hub_status in ("none", "initial_signal"):
+        recs.append("内部リンク強化: 「ブランディング会社」「ブランディング会社 選び方」等の一般語で表示されているページ・記事から本ページへの内部リンクを増やすことを検討してください。")
+    else:
+        recs.append("内部リンク強化: 一般語クエリでの表示が育っています。関連するDefinition/Service記事との相互リンクをさらに強化してください。")
+
+    recs.append("関連ページとの接続: 大阪拠点・関西エリアの実績があるService/Worksページから本ページへの導線があるか確認してください。")
+
+    if reg_status in ("confirmed", "strengthening"):
+        recs.append("東京ページへの展開: 本ページで有効だった地域キーワード構成・見出し構造を、東京ページの改善にも適用することを検討してください。")
+
+    return recs
+
+
+def _page_query_watch_md(pqw: list[dict]) -> str:
+    if not pqw:
+        return "監視対象ページが未設定です（config/aio_monitor.yml の page_query_watch を設定してください）。\n"
+
+    md: list[str] = []
+    for analysis in pqw:
+        label = analysis["label"]
+        tc = analysis["totals_current"]
+        tp = analysis["totals_previous"]
+        reg = analysis["regional"]
+        hub = analysis["aio_hub"]
+        ref_s, ref_e = analysis["reference_period"]
+
+        md.append(f"### {label}単体の検索クエリ")
+        md.append("")
+        md.append(f"> 対象URL: {analysis['url']}")
+        md.append(f"> 参考期間（90日目安）: {ref_s} 〜 {ref_e} / クエリ数 {len(analysis['ref_rows'])}件")
+        md.append("")
+
+        # 総況
+        md.append("**総況**")
+        md.append("")
+        md.append("| 指標 | 今週 | 前週 |")
+        md.append("|------|------|------|")
+        md.append(f"| クエリ数 | {tc['query_count']} | {tp['query_count']} |")
+        md.append(f"| クリック合計 | {fi(tc['clicks'])} | {fi(tp['clicks'])} |")
+        md.append(f"| 表示回数合計 | {fi(tc['impressions'])} | {fi(tp['impressions'])} |")
+        md.append(f"| 平均CTR | {fp(tc['ctr'])} | {fp(tp['ctr'])} |")
+        md.append(f"| 平均順位 | {fpos(tc['position'])} | {fpos(tp['position'])} |")
+        md.append("")
+
+        # 地域ページとしての認識
+        md.append("**地域ページとしての認識**")
+        md.append("")
+        md.append(
+            f"- 大阪・関西を含むクエリ数: {reg['query_count']}件（表示回数合計 {fi(reg['impressions'])}、前週 {fi(reg['prv_impressions'])}）"
+        )
+        md.append(f"- 参考90日での地域クエリ数: {reg['ref_query_count']}件")
+        if reg["new_queries"]:
+            md.append(f"- 前週からの新規出現クエリ: {'・'.join(reg['new_queries'])}")
+        if reg["moved_queries"]:
+            moved = "・".join(f"{r['query']}({fpos_chg(r['position_diff'])})" for r in reg["moved_queries"])
+            md.append(f"- 順位が大きく動いたクエリ（±3位以上）: {moved}")
+        md.append(f"- 判定: **{_PQ_REGIONAL_STATUS_LABEL.get(reg['status'], reg['status'])}**")
+        md.append("")
+
+        # AIOハブ候補としての広がり
+        md.append("**AIOハブ候補としての広がり**")
+        md.append("")
+        md.append(
+            f"- 一般語（地域名を含まない）: {len(hub['general_rows'])}件 / "
+            f"比較・選定系: {len(hub['comparison_rows'])}件 / 自然文: {len(hub['natural_language_rows'])}件"
+        )
+        if hub["new_queries"]:
+            md.append(f"- 前週からの新規出現クエリ: {'・'.join(hub['new_queries'])}")
+        md.append(f"- 判定: **{_PQ_AIO_HUB_STATUS_LABEL.get(hub['status'], hub['status'])}**")
+        md.append(
+            "> 注: 自然文・比較クエリの出現はAI Overviewへの掲載を意味しません。"
+            "会話型検索に近い検索意図が生まれている兆候として参考情報にとどめてください。"
+        )
+        md.append("")
+
+        # 次の対応
+        md.append("**次の対応**")
+        md.append("")
+        for rec in _page_query_recommendations(analysis):
+            md.append(f"- {rec}")
+        md.append("")
+
+    return "\n".join(md)
+
+
+_MPS_DIRECTION_ARROW = {"up": "↑", "hold": "→", "down": "↓"}
+
+
+def _mps_seo_cell_text(seo: dict) -> str:
+    """状況セルの文言。表示回数不足でpositionが実質未計測の場合は「0.0位」等の見せかけの数値を出さない。"""
+    if seo["status"] == "データ不足":
+        return f"{seo['status']}（表示回数僅少）"
+    prv_txt = f"{fpos(seo['previous_position'])}位" if seo["previous_position"] is not None else "データなし"
+    return f"{seo['status']}（{fpos(seo['current_position'])}位 ← {prv_txt}）"
+
+
+def _market_presence_summary_md(mps: list[dict]) -> str:
+    lines = [
+        "> 市場優先度＝市場機会の大きさ（Action Itemsの実行優先度とは別軸）。",
+        "",
+        "| 市場 | SEO状況 | AIO状況 | 総合 | 市場優先度 | コメント |",
+        "|---|---|---|---|---|---|",
+    ]
+    for m in mps:
+        seo, aio = m["seo"], m["aio"]
+        seo_cell = _mps_seo_cell_text(seo)
+        overall_cell = f"{_MPS_DIRECTION_ARROW.get(m['overall'], '?')} {m['market_status']}"
+        lines.append(
+            f"| {m['market']} | {seo_cell} | {aio['status']} "
+            f"| {overall_cell} | {m['market_priority']} | {m['comment']} |"
+        )
+    return "\n".join(lines)
+
+
 def gen_markdown(data: dict, config: dict) -> str:
     (cs, ce), (ps, pe) = data["periods"]
     tc = data["totals"]["current"]
@@ -1494,25 +2463,44 @@ def gen_markdown(data: dict, config: dict) -> str:
     site_url = config["site_url"]
     top_n = config.get("report", {}).get("top_n", 20)
 
-    report_month = datetime.strptime(cs, "%Y-%m-%d").strftime("%Y年%m月")
+    period_type = data.get("period_type", "monthly")
     cur_days = (datetime.strptime(ce, "%Y-%m-%d") - datetime.strptime(cs, "%Y-%m-%d")).days + 1
     prv_days = (datetime.strptime(pe, "%Y-%m-%d") - datetime.strptime(ps, "%Y-%m-%d")).days + 1
+
+    if period_type == "weekly":
+        report_title_line = f"# TCD.jp SEO / AIO 週次レポート — {cs} 〜 {ce}"
+        cur_period_label = "対象週"
+        prv_period_label = "前週"
+        cmp_label = "前週比"
+    else:
+        report_month = datetime.strptime(cs, "%Y-%m-%d").strftime("%Y年%m月")
+        report_title_line = f"# TCD.jp SEO/AIO 月次レポート — {report_month}"
+        cur_period_label = "前月"
+        prv_period_label = "前々月"
+        cmp_label = "前月比"
 
     md: list[str] = []
 
     # ── ヘッダー ──
     md += [
-        f"# TCD.jp SEO/AIO 月次レポート — {report_month}",
+        report_title_line,
         "",
         f"| | 期間 |",
         f"|---|---|",
-        f"| **前月** | {cs} 〜 {ce}（{cur_days}日間） |",
-        f"| **前々月** | {ps} 〜 {pe}（{prv_days}日間） |",
+        f"| **{cur_period_label}** | {cs} 〜 {ce}（{cur_days}日間） |",
+        f"| **{prv_period_label}** | {ps} 〜 {pe}（{prv_days}日間） |",
         f"| **生成日時** | {datetime.now().strftime('%Y年%m月%d日 %H:%M')} |",
         "",
         "---",
         "",
     ]
+
+    # ── 市場存在感サマリー ──
+    mps = data.get("market_presence_summary", [])
+    if mps:
+        md += ["## 市場存在感サマリー", ""]
+        md.append(_market_presence_summary_md(mps))
+        md += ["", "---", ""]
 
     # ── Executive Summary ──
     md += ["## Executive Summary", ""]
@@ -1535,17 +2523,16 @@ def gen_markdown(data: dict, config: dict) -> str:
     md += [
         "## Action Items",
         "",
-        "> 来週やるべき実務タスク（優先度順）。",
+        "> 来週やるべき実務タスク（実行優先度順。市場存在感サマリーの「市場優先度」＝機会の大きさとは別軸）。",
         "",
     ]
-    for item in gen_action_items(data):
-        md.append(f"- {item}")
+    md.append(_action_items_md(gen_action_items(data)))
     md += ["", "---", ""]
 
     # ── 1. サイト全体サマリー ──
     md += ["## 1. サイト全体サマリー", ""]
     md += [
-        "| 指標 | 前月 | 前々月 | 増減 | 増減率 |",
+        f"| 指標 | {cur_period_label} | {prv_period_label} | 増減 | 増減率 |",
         "|------|------|------|------|--------|",
     ]
 
@@ -1573,7 +2560,9 @@ def gen_markdown(data: dict, config: dict) -> str:
     )
     # 順位は小さい方が良いので矢印逆
     pos_d = tc["position"] - tp["position"]
-    pos_trend = "↑改善" if pos_d < -0.05 else ("↓低下" if pos_d > 0.05 else "→横ばい")
+    label = pos_trend_label(pos_d)
+    arrow = "↑" if pos_d < -0.3 else ("↓" if pos_d > 0.3 else "→")
+    pos_trend = f"{arrow}{label}"
     md.append(
         f"| 平均掲載順位 | {fpos(tc['position'])} | {fpos(tp['position'])} "
         f"| {fpos_chg(pos_d)} | {pos_trend} |"
@@ -1584,111 +2573,50 @@ def gen_markdown(data: dict, config: dict) -> str:
     md += ["## 2. 重点キーワード分析", ""]
     md.append(_kw_table_md(data["key_kws"]))
 
-    # ── 3. Google AI Overview 観測 ──
-    md += ["## 3. Google AI Overview 観測", ""]
-    gaio = data.get("google_aio", [])
-    if not gaio or all(r.get("status") == "API_KEY_MISSING" for r in gaio):
-        md.append("観測データなし（SERPAPI_API_KEY 未設定または無効）。\n")
-    else:
-        md += [
-            "| クエリ | ステータス | AIO有無 | TCD引用 | TCD言及 | 競合引用ドメイン |",
-            "|--------|-----------|--------|--------|--------|----------------|",
-        ]
-        for r in gaio:
-            aio  = "✅ あり" if r.get("aio_exists") else ("⬜ なし" if r.get("aio_exists") is False else "?")
-            tcd_c = "✅" if r.get("tcd_cited") else "なし"
-            tcd_m = "✅" if r.get("tcd_mentioned") else "なし"
-            comp  = "・".join(r.get("competitor_domains", [])[:3]) or "-"
-            md.append(f"| {r['query']} | {r.get('status','')} | {aio} | {tcd_c} | {tcd_m} | {comp} |")
-        md.append("")
-        for r in gaio:
-            if r.get("aio_exists"):
-                md.append(f"### {r['query']}")
-                md.append("")
-                if r.get("aio_text"):
-                    md.append(f"**AIO本文抜粋**: {r['aio_text'][:300]}")
-                    md.append("")
-                if r.get("cited_urls"):
-                    md.append("**引用URL一覧:**")
-                    for u in r["cited_urls"]:
-                        md.append(f"- {u}")
-                    md.append("")
-                if r.get("tcd_cited_urls"):
-                    md.append("**TCD引用URL:**")
-                    for u in r["tcd_cited_urls"]:
-                        md.append(f"- {u}")
-                    md.append("")
-                if r.get("competitor_domains"):
-                    md.append(f"**競合引用ドメイン**: {', '.join(r['competitor_domains'])}")
-                    md.append("")
+    # ── 3. AIO競合状況（旧: Google AI Overview観測 + 定点SERP観測を統合） ──
+    md += [
+        "## 3. AIO競合状況（週次AIOスナップショット）",
+        "",
+        "> 今週誰が引用されたか・前週との差分（新規/消失）・TCD引用状況をまとめます。"
+        "本文全体・URL一覧はreports/google_aio/配下のJSONを参照してください。",
+        "",
+    ]
+    md.append(_aio_competitor_status_md(data.get("aio_competitor_status", [])))
 
-    # ── 4. AIO競合ランキング ──
+    # ── 4. AIO競合ランキング / AIO参考情報源 ──
     md += ["## 4. AIO競合ランキング", ""]
     period_label = "今週" if data.get("period_type") == "weekly" else "今月"
-    ranking, total_aio = aio_competitor_ranking(data.get("google_aio", []))
-    md.append(f"### {period_label}引用された企業（観測AIO: {total_aio}件）")
+    ranking, total_aio = aio_competitor_ranking(data.get("google_aio", []), entity_types=data.get("domain_entity_types", {}))
+    competitors, reference_sources = split_ranking_by_entity_type(ranking)
+    md.append(f"### {period_label}観測AIO: {total_aio}件")
     md.append("")
-    if ranking:
-        md += ["| 企業 | 対象キーワード | AIシェア |", "|------|-------------|---------|"]
-        for item in ranking:
-            kw_txt = "、".join(item.get("keywords", [])) or "—"
-            share_txt = f'{item["count"]}件 ({item["share"]:.0f}%)'
-            md.append(f"| {item['name']} | {kw_txt} | {share_txt} |")
+    md.append(_ranking_table_md(competitors[:10]))
+    if not competitors:
+        md.append("競合（ブランディング/コンサル会社）は検出されませんでした。\n")
+    else:
+        md.append("")
+        md.append(
+            "> AIO登場率 = そのドメインが引用されたAIO件数 ÷ AIO表示クエリ数。"
+            "1件のAIOに複数ドメインが引用され得るため、合計は100%になりません。"
+        )
         md.append("")
         hypothesis = gen_aio_competitor_hypothesis(ranking, total_aio, period_label)
         if hypothesis:
             md.append(f"> {hypothesis}")
             md.append("")
-    else:
-        md.append("AIOに引用された企業は検出されませんでした。\n")
 
-    # ── 5. 定点SERP観測（重点4キーワード） ──
-    md += ["## 5. 定点SERP観測（重点4キーワード）", ""]
-    md.append(
-        "> 「ブランディング会社 東京/大阪」「インナーブランディング会社 東京/大阪」の4キーワードについて、"
-        "Google検索結果を毎週定点観測しています（誰が増えたか／AIOの有無／引用元の変化）。"
-    )
-    md.append("")
-    pw = data.get("point_watch", [])
-    if not pw:
-        md.append("観測データなし（SERPAPI_API_KEY 未設定、または point_watch_queries 未設定）。\n")
-    else:
-        rate = point_watch_aio_presence_rate(pw)
-        if rate is not None:
-            md.append(f"**AIO表示率（定点観測4キーワード中）**: {rate:.0f}%")
-            md.append("")
-        md += [
-            "| キーワード | AIO有無 | AIO変化 | 引用元変化 | SERP安定度 | 新規引用ドメイン（誰が増えたか） | 消失ドメイン |",
-            "|-----------|--------|--------|-----------|-----------|--------------------------------|------------|",
-        ]
-        for r in pw:
-            aio = "✅ あり" if r["aio_exists"] else "⬜ なし"
-            if not r["has_previous"]:
-                cite_chg = "初回観測"
-            else:
-                cite_chg = "✅ 変化あり" if r["citation_changed"] else "変化なし"
-            new_d  = "・".join(r["new_domains"]) or "-"
-            lost_d = "・".join(r["lost_domains"]) or "-"
-            md.append(f"| {r['query']} | {aio} | {r['aio_change']} | {cite_chg} | {r['serp_stability']} | {new_d} | {lost_d} |")
+    md += ["### AIO参考情報源（銀行・行政・メディア等、ブランディング/コンサル会社以外の引用元）", ""]
+    if reference_sources:
+        md.append(_ranking_table_md(reference_sources[:10]))
         md.append("")
-
-        highlights = [r for r in pw if r["new_domains"] or r["citation_changed"] or r["aio_change"] not in ("変化なし",)]
-        if highlights:
-            md.append("**今週の変化点:**")
-            for r in highlights:
-                notes = []
-                if r["aio_change"] != "変化なし":
-                    notes.append(f"AIOが{r['aio_change']}")
-                if r["new_domains"]:
-                    notes.append(f"新規引用: {'・'.join(r['new_domains'])}")
-                if r["lost_domains"]:
-                    notes.append(f"引用消失: {'・'.join(r['lost_domains'])}")
-                md.append(f"- 「{r['query']}」: {' / '.join(notes)}")
-            md.append("")
+        md.append(f"> 全{len(reference_sources)}件のうち上位10件を表示。")
+        md.append("")
+    else:
+        md.append("参考情報源は検出されませんでした。\n")
 
     # ── 6. AIO Opportunity ──
     md += [
-        "## 6. AIO Opportunity",
+        "## 5. AIO Opportunity",
         "",
         "> AIOに引用される可能性がありながら未引用のキーワード（Imp 100以上・順位15位以内・TCD未引用）を抽出しています。",
         "",
@@ -1712,7 +2640,7 @@ def gen_markdown(data: dict, config: dict) -> str:
 
     # ── 7. AIO Daily Summary ──
     md += [
-        "## 7. AIO Daily Summary",
+        "## 6. AIO Daily Summary（日次AIO推移）",
         "",
         "> aio_daily_monitor.py（毎朝6時実行）が観測した日次AIOデータを、本レポートと同じ対象期間で集計しています。",
         "",
@@ -1720,16 +2648,25 @@ def gen_markdown(data: dict, config: dict) -> str:
     md.append(_aio_daily_summary_md(data.get("aio_daily_summary", {})))
 
     # ── 8. クエリ別AIO日次モニター ──
-    md += ["## 8. クエリ別AIO日次モニター", ""]
-    md.append(_aio_query_daily_table_md(data.get("aio_daily_summary", {}).get("query_level", [])))
+    md += ["## 7. クエリ別AIO日次モニター", ""]
+    _aio_summary_for_note = data.get("aio_daily_summary", {})
+    if _aio_summary_for_note.get("is_reference_only"):
+        obs = _aio_summary_for_note.get("observed_days", 0)
+        md += [f"※ 本表は観測{obs}日分の基準データです。表示率・引用率は参考値として扱います。", ""]
+    md.append(_aio_query_daily_table_md(_aio_summary_for_note.get("query_level", [])))
 
-    # ── 9. 引用ドメイン推移 ──
-    md += ["## 9. 引用ドメイン推移", ""]
-    md.append(_aio_domain_trend_table_md(data.get("aio_domain_trend", {})))
+    # ── 9. AIO市場変化 ──
+    md += [
+        "## 8. AIO市場変化",
+        "",
+        "> 引用ドメインの一覧ではなく、市場で誰の存在感が変化したか（継続・新規・消失）を示します。",
+        "",
+    ]
+    md.append(_citation_trends_md(data.get("citation_trends", {})))
 
     # ── 10. AIO本文変化サマリー ──
     md += [
-        "## 10. AIO本文変化サマリー",
+        "## 9. AIO本文変化サマリー",
         "",
         "> 本文全文は data/aio/daily/YYYY-MM-DD.json を参照してください。ここではハッシュ変化のみを扱います。",
         "",
@@ -1737,23 +2674,23 @@ def gen_markdown(data: dict, config: dict) -> str:
     md.append(_aio_text_change_summary_md(data.get("aio_text_changes", {})))
 
     # ── 11. サービス系 ──
-    md += ["## 11. サービス系", ""]
+    md += ["## 10. サービス系", ""]
     md.append(_page_table_md(data["service_pages"], site_url))
 
     # ── 12. サービスDefinition系 ──
-    md += ["## 12. サービスDefinition系", ""]
+    md += ["## 11. サービスDefinition系", ""]
     md.append(_page_table_md(data["aio_pages"], site_url))
 
     # ── 13. マガジン系 ──
-    md += ["## 13. マガジン系", ""]
+    md += ["## 12. マガジン系", ""]
     md.append(_page_table_md(data["def_pages"], site_url))
 
     # ── 14. 重要ページ ──
-    md += ["## 14. 重要ページ分析", ""]
+    md += ["## 13. 重要ページ分析", ""]
     md.append(_page_table_md(data["lp_pages"], site_url))
 
     # ── 15. デバイス別 ──
-    md += ["## 15. デバイス別分析", ""]
+    md += ["## 14. デバイス別分析", ""]
     devs = data["devices"]
     if devs:
         md += [
@@ -1772,7 +2709,7 @@ def gen_markdown(data: dict, config: dict) -> str:
 
     # ── 12. CTR確認候補クエリ（参考） ──
     md += [
-        "## 16. 参考：CTR確認候補クエリ",
+        "## 15. 参考：CTR確認候補クエリ",
         "",
         "> 掲載順位に対してCTRが低いクエリ一覧。SERP変化・AI Overview影響の可能性があります。断定ではなく次月以降の確認ポイントとしてご参照ください。",
         "",
@@ -1795,7 +2732,7 @@ def gen_markdown(data: dict, config: dict) -> str:
         md.append("AIOシグナル（閾値超え）は検出されませんでした。\n")
 
     # ── 13. 上位クエリ ──
-    md += [f"## 17. 上位クエリ TOP{top_n}", ""]
+    md += [f"## 16. 上位クエリ TOP{top_n}", ""]
     tq = data["top_queries"]
     if tq:
         md += [
@@ -1815,7 +2752,7 @@ def gen_markdown(data: dict, config: dict) -> str:
         md.append("データなし\n")
 
     # ── 14. 上位ページ ──
-    md += [f"## 18. 上位ページ TOP{top_n}", ""]
+    md += [f"## 17. 上位ページ TOP{top_n}", ""]
     tp_list = data["top_pages"]
     base = site_url.rstrip("/")
     if tp_list:
@@ -1838,7 +2775,7 @@ def gen_markdown(data: dict, config: dict) -> str:
 
     # ── 15. 新規・更新ページのインデックス監視 ──
     md += [
-        "## 19. 新規・更新ページのインデックス監視",
+        "## 18. 新規・更新ページのインデックス監視",
         "",
         "> 新規Definition記事・更新ページがSearch Console上に出始めたかを追跡しています"
         "（config/aio_monitor.yml の new_index_watch に追加すると対象になります）。",
@@ -1846,30 +2783,43 @@ def gen_markdown(data: dict, config: dict) -> str:
     ]
     idx_mon = data.get("index_monitoring", [])
     _STATUS_LABEL_MD = {
-        "not_seen":           "未検出",
-        "indexed_no_impression": "インデックス済・表示回数0",
-        "impression_started": "表示開始",
-        "ranking_started":    "クリック発生",
+        "not_detected":       "未検出",
+        "indexed":            "インデックス済（表示ごく僅か）",
+        "gaining_impressions": "Impression獲得中",
+        "gaining_clicks":     "クリック発生",
     }
     if idx_mon:
         md += [
-            "| ページ | 公開・更新日 | 初回表示検出 | IMP | クリック | 平均順位 | ステータス |",
-            "|-------|-------------|-------------|-----|---------|---------|----------|",
+            "| ページ | 公開・更新日 | 経過日数 | 初回Impression | 初回Click | Impression | クリック | 平均順位 | ステータス |",
+            "|-------|-------------|---------|---------------|----------|-----------|---------|---------|----------|",
         ]
         for p in idx_mon:
-            first_seen = p["first_seen_in_search_console"] or "-"
+            first_imp = p["first_impression_date"] or "-"
+            first_clk = p["first_click_date"] or "-"
+            days = f'{p["days_since_publish"]}日' if p["days_since_publish"] is not None else "-"
             status_txt = _STATUS_LABEL_MD.get(p["status"], p["status"])
             md.append(
-                f"| [{p['page_title']}]({p['url']}) | {p['published_or_updated_date'] or '-'} "
-                f"| {first_seen} | {fi(p['impressions'])} | {fi(p['clicks'])} "
-                f"| {fpos(p['average_position'])} | {status_txt} |"
+                f"| [{p['page_title']}]({p['url']}) | {p['published_or_updated_date'] or '-'} | {days} "
+                f"| {first_imp} | {first_clk} | {fi(p['current_impressions'])} | {fi(p['current_clicks'])} "
+                f"| {fpos(p['current_position'])} | {status_txt} |"
             )
         md.append("")
     else:
         md.append("監視対象ページが未登録です（config/aio_monitor.yml の new_index_watch を設定してください）。\n")
 
-    # ── 16. 次月確認ポイント ──
-    md += ["## 20. 次月確認ポイント・改善推奨", ""]
+    # ── 16. ページ単体クエリ分析 ──
+    md += [
+        "## 19. ページ単体クエリ分析",
+        "",
+        "> ページ単体に絞り込んだ検索クエリから、地域ページとしての認識度・AIOハブ候補としての育ちを確認します"
+        "（config/aio_monitor.yml の page_query_watch に対象ページを追加できます）。",
+        "",
+    ]
+    md.append(_page_query_watch_md(data.get("page_query_watch", [])))
+
+    # ── 17. 次週/次月確認ポイント ──
+    next_heading = "次週確認ポイント・改善推奨" if period_type == "weekly" else "次月確認ポイント・改善推奨"
+    md += [f"## 20. {next_heading}", ""]
     md.append(gen_insights(data))
     md.append("")
 
@@ -1922,7 +2872,7 @@ def gen_html(data: dict, config: dict) -> str:
 
     def chg_span(val: float | None) -> str:
         if val is None:
-            return f'<span style="color:{MUTED};font-size:14px;">NEW</span>'
+            return f'<span style="color:{MUTED};font-size:14px;">—</span>'
         color  = UP if val > 1 else (DOWN if val < -1 else MUTED)
         prefix = "+" if val > 0 else ""
         return f'<span style="color:{color};font-weight:700;">{prefix}{val:.1f}%</span>'
@@ -2111,7 +3061,8 @@ def gen_html(data: dict, config: dict) -> str:
             vals = [f'{fi(cd["impressions"])} Imp']
             if cd["clicks"] > 0:
                 vals.append(f'{fi(cd["clicks"])} Click')
-            found.append(f'「{top["name"]}」は {" ・ ".join(vals)} を記録している（初期値）。')
+            suffix = "（初期値）" if not has_global_prev else ""
+            found.append(f'「{top["name"]}」は {" ・ ".join(vals)} を記録している{suffix}。')
 
         # 順位10位以内到達（Rule 5: imp>=30）
         top10 = sorted(
@@ -2123,10 +3074,14 @@ def gen_html(data: dict, config: dict) -> str:
             best = top10[0]
             cd   = best["cur"]
             name = best.get("query") or best.get("name", "")
-            found.append(f'「{name}」が順位 {cd["position"]:.1f} 位で検索上位10位以内に到達している（初期値）。')
+            suffix = "（初期値）" if not has_global_prev else ""
+            found.append(f'「{name}」が順位 {cd["position"]:.1f} 位で検索上位10位以内に到達している{suffix}。')
 
         if not found:
-            found.append("データ蓄積中。次月以降の比較対象として初期観測フェーズの値を記録した。")
+            if has_global_prev:
+                found.append("データ蓄積中。目立った変化は検出されなかった。")
+            else:
+                found.append(f"データ蓄積中。次{period_unit}以降の比較対象として初期観測フェーズの値を記録した。")
         return found[:5]
 
     # ── 今月の仮説（観察ベース・スクリーニングルール適用） ──
@@ -2191,13 +3146,16 @@ def gen_html(data: dict, config: dict) -> str:
             hypos.append(f'{names} は表示回数が少ない状態。')
 
         if not hypos:
-            hypos.append("観察対象となる数値変化は次月以降に整理する。現時点では初期値として記録する。")
+            if has_global_prev:
+                hypos.append("観察対象となる明確な数値変化は検出されなかった。")
+            else:
+                hypos.append(f"観察対象となる数値変化は次{period_unit}以降に整理する。現時点では初期値として記録する。")
         return hypos[:5]
 
     # ── AIO対策サジェスション ──
     def gen_aio_suggestions() -> list[str]:
         gaio = data.get("google_aio", [])
-        ranking, total_aio = aio_competitor_ranking(gaio)
+        ranking, total_aio = aio_competitor_ranking(gaio, entity_types=data.get("domain_entity_types", {}))
         suggestions = []
 
         # S1: AIOに表示されているがTCDが未引用のクエリへの対策
@@ -2259,18 +3217,26 @@ def gen_html(data: dict, config: dict) -> str:
     def summary_html() -> str:
         paras = []
 
-        # P1: 全体状況 + ベースライン注記
+        # P1: 全体状況（Search ConsoleとAIO日次観測のステータスを混同しないよう分離）
         active_areas = []
         if kw_active:
             active_areas.append("ブランディング会社・インナーブランディング領域")
         if aio_active or def_active:
             active_areas.append("サービス・Definition記事群")
-        p1 = (
-            f'<strong style="color:{NAVY};">&#9432; 初期観測フェーズ</strong> — '
-            f'Search Consoleの計測開始が{report_month}中旬のため、本レポートは初期観測フェーズとして扱います。'
-        )
+        aio_summary_for_note = data.get("aio_daily_summary", {})
+        if not has_global_prev:
+            p1 = (
+                f'<strong style="color:{NAVY};">&#9432; 初期観測フェーズ</strong> — '
+                f'Search Console側は比較対象となる前{period_unit}データが存在しないため、初期観測フェーズとして扱います。'
+            )
+        else:
+            p1 = f'Search Consoleは既存データによる{period_unit}次比較を実施。'
+        if aio_summary_for_note.get("is_reference_only"):
+            obs_days = aio_summary_for_note.get("observed_days", 0)
+            exp_days = aio_summary_for_note.get("expected_days", 0)
+            p1 += f' AIO日次観測は蓄積期間が浅く（観測{obs_days}/{exp_days}日）、AIO関連の数値は参考値です。'
         if active_areas:
-            p1 += f'ただし、{"および".join(active_areas)}で検索露出が確認できている。'
+            p1 += f'{"および".join(active_areas)}で検索露出が確認できている。'
         paras.append(p1)
 
         # P2: Definition評価（実数値あり）
@@ -2295,10 +3261,11 @@ def gen_html(data: dict, config: dict) -> str:
             names = "・".join(_aio_label(r) for r in aio_active[:2])
             paras.append(f'サービス群では {names} が検索結果に出始めている。')
 
-        # P4: 来月確認
+        # P4: 次週/次月確認
         if kw_active:
             names = "・".join(f'「{r["query"]}」' for r in kw_active[:2])
-            paras.append(f'次月以降は {names} 関連KWの推移を重点確認する。')
+            next_period = "次週以降" if period_type == "weekly" else "次月以降"
+            paras.append(f'{next_period}は {names} 関連KWの推移を重点確認する。')
 
         return "<br><br>".join(paras)
 
@@ -2314,6 +3281,58 @@ def gen_html(data: dict, config: dict) -> str:
     hypothesis_html    = "".join(hypothesis_row(h) for h in gen_hypothesis())
     checkpoints_html   = "".join(check_row(c)      for c in gen_html_checkpoints())
     aio_suggestions_html = "".join(check_row(s)    for s in gen_aio_suggestions())
+
+    # ── 市場存在感サマリー（レポート冒頭） ──
+    _MPS_ARROW_COLOR = {"up": UP, "hold": MUTED, "down": DOWN}
+
+    def _market_presence_summary_section() -> str:
+        mps = data.get("market_presence_summary", [])
+        if not mps:
+            return ""
+        title_html = (
+            f'<tr><td style="padding-bottom:4px;">'
+            f'<div style="color:{NAVY};font-size:19px;font-weight:700;">市場存在感サマリー</div>'
+            f'</td></tr>'
+            f'<tr><td style="padding-bottom:10px;">'
+            f'<p style="color:{MUTED};font-size:12px;margin:0;">市場優先度＝市場機会の大きさ（Action Itemsの実行優先度とは別軸）。</p>'
+            f'</td></tr>'
+        )
+
+        def arrow_span(direction: str) -> str:
+            color = _MPS_ARROW_COLOR.get(direction, MUTED)
+            arrow = _MPS_DIRECTION_ARROW.get(direction, "?")
+            return f'<span style="color:{color};font-weight:700;">{arrow}</span>'
+
+        _PRIORITY_COLOR = {"高": DOWN, "中": "#e0a930", "低": MUTED}
+
+        hdr = (
+            th("市場", "left", "150") + th("SEO状況", "left", "170") + th("AIO状況", "center", "90") +
+            th("総合", "left", "90") + th("市場優先度", "center", "70") + th("コメント", "left", "220")
+        )
+        rows_html = ""
+        for m in mps:
+            seo, aio = m["seo"], m["aio"]
+            if seo["status"] == "データ不足":
+                seo_detail = "表示回数僅少"
+            else:
+                prv_txt = f"{fpos(seo['previous_position'])}位" if seo["previous_position"] is not None else "データなし"
+                seo_detail = f"{fpos(seo['current_position'])}位 ← {prv_txt}"
+            seo_cell = f'{esc(seo["status"])}<br><span style="color:{MUTED};font-size:13px;">{esc(seo_detail)}</span>'
+            overall_cell = f'{arrow_span(m["overall"])} {esc(m["market_status"])}'
+            priority_color = _PRIORITY_COLOR.get(m["market_priority"], MUTED)
+            priority_cell = f'<span style="color:{priority_color};font-weight:700;">{esc(m["market_priority"])}</span>'
+            rows_html += (
+                "<tr>"
+                + td_cell(esc(m["market"]))
+                + td_cell(seo_cell)
+                + td_cell(esc(aio["status"]), "center")
+                + td_cell(overall_cell)
+                + td_cell(priority_cell, "center")
+                + td_cell(esc(m["comment"]))
+                + "</tr>\n"
+            )
+        table_html = wrap_table(hdr, rows_html)
+        return title_html + f'<tr><td style="padding-bottom:24px;">{table_html}</td></tr>'
 
     # ── Executive Summary（経営層向け要約） ──
     def _executive_summary_section() -> str:
@@ -2344,30 +3363,59 @@ def gen_html(data: dict, config: dict) -> str:
             f'{rows}'
         )
 
-    # ── Action Items セクション（来週やること） ──
+    # ── Action Items セクション（来週やること・1件=1カード表示） ──
+    def _action_item_card(a: dict) -> str:
+        signal_txt = "・".join(a["expected_signal"]) if a["expected_signal"] else "-"
+        target_val = f'{esc(a["target"])}（{esc(a["content_type"])}）'
+        review_val = f'{esc(a["review_date"])}（{a["review_weeks"]}週間後）'
+
+        def row(label: str, value: str) -> str:
+            return (
+                f'<tr><td style="padding:3px 0;font-size:14px;color:{MUTED};width:90px;vertical-align:top;white-space:nowrap;">{esc(label)}</td>'
+                f'<td style="padding:3px 0;font-size:14px;color:{TEXT};">{value}</td></tr>'
+            )
+
+        rows_html = (
+            row("根拠", esc(a["evidence"]))
+            + row("対象", target_val)
+            + row("施策", esc(a["action"]))
+            + row("期待シグナル", esc(signal_txt))
+            + row("確認日", review_val)
+        )
+        return (
+            f'<tr><td style="padding-bottom:12px;">'
+            f'<div style="background:{INFO_BG};border-left:4px solid {CYAN};border-radius:0 8px 8px 0;padding:14px 18px;">'
+            f'<div style="margin-bottom:8px;">'
+            f'<span style="display:inline-block;background:{NAVY};color:#fff;font-size:12px;font-weight:700;'
+            f'padding:2px 8px;border-radius:10px;margin-right:8px;">優先度{a["priority"]}</span>'
+            f'<span style="color:{NAVY};font-size:16px;font-weight:700;">{esc(a["title"])}</span>'
+            f'</div>'
+            f'<table cellpadding="0" cellspacing="0" width="100%">{rows_html}</table>'
+            f'</div></td></tr>'
+        )
+
     def _action_items_section() -> str:
-        rows = "".join(check_row(a) for a in gen_action_items(data))
+        rows = "".join(_action_item_card(a) for a in gen_action_items(data))
         return (
             f'<tr><td style="padding-top:20px;padding-bottom:2px;">'
             f'<div style="color:{NAVY};font-size:21px;font-weight:800;margin-bottom:2px;">Action Items</div>'
-            f'<p style="color:{MUTED};font-size:13px;margin:0 0 12px;">来週やるべき実務タスク（優先度順）</p>'
+            f'<p style="color:{MUTED};font-size:13px;margin:0 0 12px;">来週やるべき実務タスク（実行優先度順。市場優先度＝機会の大きさとは別軸）</p>'
             f'</td></tr>'
             f'{rows}'
         )
 
     # ── Google AI Overview セクション（SerpAPI）──
-    def _google_aio_section() -> str:
-        gaio = data.get("google_aio", [])
-        title_html = sec_title("3", "Google AI Overview 観測")
+    def _aio_competitor_status_section() -> str:
+        rows = data.get("aio_competitor_status", [])
+        title_html = sec_title("3", "AIO競合状況（週次AIOスナップショット）")
         note_row = (
             f'<tr><td style="padding-bottom:8px;">'
             f'<p style="color:{MUTED};font-size:14px;margin:0;">'
-            f'SerpAPI 経由で Google 検索上の AI Overview（AIによる概要）を観測しています。'
-            f'取得失敗はAIOなしとは区別します。'
+            f'今週誰が引用されたか・前週との差分（新規/消失）・TCD引用状況をまとめます。'
+            f'本文全体・URL一覧は reports/google_aio/ 配下のJSONを参照してください。'
             f'</p></td></tr>'
         )
-        no_real_data = all(r.get("status") == "API_KEY_MISSING" for r in gaio) if gaio else True
-        if not gaio or no_real_data:
+        if not rows:
             return (
                 title_html + note_row +
                 f'<tr><td style="padding-bottom:16px;">'
@@ -2375,74 +3423,79 @@ def gen_html(data: dict, config: dict) -> str:
                 f'観測データなし（SERPAPI_API_KEY 未設定または無効）。</p></td></tr>'
             )
 
-        hdr = (
-            th("クエリ", "left", "150") +
-            th("AIO有無", "center", "70") +
-            th("TCD引用", "center", "70") +
-            th("引用URL（上位）") +
-            th("競合引用", "left", "120")
-        )
-        rows_html = ""
-        _STATUS_LABEL = {
-            "OK_WITH_AIO": ("AIOあり",   UP),
-            "OK_NO_AIO":   ("AIOなし",   MUTED),
-            "FETCH_ERROR": ("取得失敗",  DOWN),
-            "API_KEY_MISSING": ("APIキー未設定", DOWN),
-        }
-        for r in gaio:
-            status = r.get("status", "OK_NO_AIO")
-            s_label, s_color = _STATUS_LABEL.get(status, (status, MUTED))
-
-            tcd_cited = r.get("tcd_cited", False)
-            tcd_color = UP if tcd_cited else MUTED
-            tcd_txt   = "&#9989; 引用あり" if tcd_cited else ("言及のみ" if r.get("tcd_mentioned") else "なし")
-
-            urls = r.get("cited_urls", [])
-            url_html = "<br>".join(
-                f'<a href="{esc(u)}" style="color:{CYAN};font-size:14px;text-decoration:none;">{esc(_extract_domain(u))}</a>'
-                for u in urls[:3]
-            ) or f'<span style="color:{MUTED};font-size:14px;">-</span>'
-
-            comp = "・".join(esc(d) for d in r.get("competitor_domains", [])[:3]) or "-"
-
-            rows_html += (
-                "<tr>"
-                + td_cell(esc(r["query"]))
-                + td_cell(f'<span style="color:{s_color};font-weight:700;">{s_label}</span>', "center")
-                + td_cell(f'<span style="color:{tcd_color};font-weight:700;">{tcd_txt}</span>', "center")
-                + td_cell(url_html)
-                + td_cell(f'<span style="font-size:15px;">{comp}</span>')
-                + "</tr>\n"
+        blocks = ""
+        for r in rows:
+            header = (
+                f'<tr><td style="padding-top:10px;padding-bottom:4px;">'
+                f'<div style="color:{NAVY};font-size:16px;font-weight:700;">{esc(r["query"])}</div>'
+                f'</td></tr>'
             )
-            if tcd_cited and r.get("tcd_cited_urls"):
-                tcd_url_html = "・".join(
-                    f'<a href="{esc(u)}" style="color:{UP};font-size:14px;">{esc(_extract_domain(u))}</a>'
-                    for u in r["tcd_cited_urls"][:2]
-                )
-                rows_html += (
-                    f'<tr style="background:#f0fdf4;"><td colspan="5" '
-                    f'style="padding:5px 10px 7px;font-size:14px;color:{UP};">'
-                    f'&#9989; TCD引用URL: {tcd_url_html}</td></tr>\n'
-                )
-            elif r.get("aio_text") and r.get("aio_exists"):
-                rows_html += (
-                    f'<tr style="background:#f8fafc;"><td colspan="5" '
-                    f'style="padding:5px 10px 7px;font-size:14px;color:{MUTED};">'
-                    f'&#128203; AIO抜粋: {esc((r["aio_text"] or "")[:120])}…</td></tr>\n'
-                )
-
-        table_html = wrap_table(hdr, rows_html)
-        return title_html + note_row + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
+            if not r["aio_exists"]:
+                blocks += header + check_row("AIOは表示されていません。") + f'<tr><td style="padding-bottom:6px;"></td></tr>'
+                continue
+            cited = "・".join(r["cited_companies"]) or "なし"
+            lines = [f"今週引用: {cited}"]
+            if not r["has_previous"]:
+                lines.append("前週比: 初回観測")
+            else:
+                new_txt = "・".join(r["new_companies"]) or "なし"
+                lost_txt = "・".join(r["lost_companies"]) or "なし"
+                lines.append(f"前週比: 新規 {new_txt} ／ 消失 {lost_txt}")
+            tcd_color = UP if r["tcd_cited"] else MUTED
+            tcd_line = f'TCD: <span style="color:{tcd_color};font-weight:700;">{"引用あり" if r["tcd_cited"] else "未引用"}</span>'
+            blocks += (
+                header
+                + "".join(check_row(t) for t in lines)
+                + f'<tr><td style="padding:4px 0 4px 12px;border-left:3px solid {BORDER};'
+                f'color:{TEXT};font-size:16px;line-height:1.6;">&#8250; {tcd_line}</td></tr>'
+                + f'<tr><td style="padding-bottom:6px;"></td></tr>'
+            )
+        return title_html + note_row + blocks
 
     # ── AIO競合ランキング セクション ──
+    _ENTITY_TYPE_LABEL = {
+        "branding_company": "ブランディング会社", "consulting_company": "コンサル会社",
+        "client_company": "クライアント企業", "media": "メディア",
+        "public_institution": "公的機関", "financial_institution": "金融機関",
+        "platform": "プラットフォーム", "unknown": "不明",
+    }
+
+    def _ranking_table_html(items: list[dict]) -> str:
+        """domain列には正規化済みホスト名のみを表示し、解決できない場合は「-」を表示する
+        （会社名をdomain列へ代入しない）。"""
+        hdr = (
+            th("企業（表示名）", "left") + th("ドメイン", "left") + th("種別", "center", "110") +
+            th("対象キーワード", "left") + th("AIO登場率", "right", "110")
+        )
+        rows_html = ""
+        for item in items:
+            kw_txt = "、".join(item.get("keywords", [])) or "—"
+            share_txt = f'{item["count"]}件 ({item["appearance_rate"]:.0f}%)'
+            is_tcd = item.get("is_tcd", False)
+            name_cell = (
+                f'<span style="color:{NAVY};font-weight:700;">{esc(item["display_name"])}</span>'
+                if is_tcd else esc(item["display_name"])
+            )
+            entity_label = _ENTITY_TYPE_LABEL.get(item.get("entity_type", "unknown"), "不明")
+            share_color = UP if item["count"] > 0 else MUTED
+            share_cell = f'<span style="color:{share_color};font-weight:700;">{share_txt}</span>'
+            row_style = ' style="background:#f0fdf4;"' if is_tcd else ""
+            domain_txt = item.get("domain") or "-"
+            rows_html += (
+                f'<tr{row_style}>{td_cell(name_cell)}{td_cell(esc(domain_txt))}'
+                f'{td_cell(entity_label, "center")}{td_cell(esc(kw_txt))}{td_cell(share_cell, "right")}</tr>\n'
+            )
+        return wrap_table(hdr, rows_html)
+
     def _aio_competitor_section() -> str:
-        ranking, total_aio = aio_competitor_ranking(data.get("google_aio", []))
+        ranking, total_aio = aio_competitor_ranking(data.get("google_aio", []), entity_types=data.get("domain_entity_types", {}))
+        competitors, reference_sources = split_ranking_by_entity_type(ranking)
         title_html = sec_title("4", "AIO競合ランキング")
         label = "今週" if period_type == "weekly" else "今月"
         subtitle = (
             f'<tr><td style="padding-bottom:8px;">'
             f'<p style="color:{MUTED};font-size:15px;margin:0 0 8px;">'
-            f'{label}引用された企業　（観測AIO: {total_aio}件）</p></td></tr>'
+            f'{label}観測AIO: {total_aio}件</p></td></tr>'
         )
         if not ranking:
             return (
@@ -2451,101 +3504,62 @@ def gen_html(data: dict, config: dict) -> str:
                 f'<p style="color:{MUTED};font-size:15px;margin:0;">'
                 f'AIOに引用された企業は検出されませんでした。</p></td></tr>'
             )
-        hdr = th("企業", "left") + th("対象キーワード", "left") + th("AIシェア", "right", "110")
-        rows_html = ""
-        for item in ranking:
-            kw_txt = "、".join(item.get("keywords", [])) or "—"
-            share_txt = f'{item["count"]}件 ({item["share"]:.0f}%)'
-            is_tcd = item.get("is_tcd", False)
-            name_cell = (
-                f'<span style="color:{NAVY};font-weight:700;">{esc(item["name"])}</span>'
-                if is_tcd else esc(item["name"])
+
+        competitor_block = ""
+        if competitors:
+            competitor_block = f'<tr><td style="padding-bottom:8px;">{_ranking_table_html(competitors[:10])}</td></tr>'
+            competitor_block += (
+                f'<tr><td style="padding:4px 0 4px;">'
+                f'<p style="color:{MUTED};font-size:12px;margin:0;">'
+                f'※ AIO登場率 = そのドメインが引用されたAIO件数 ÷ AIO表示クエリ数。'
+                f'1件のAIOに複数ドメインが引用され得るため、合計は100%になりません。'
+                f'</p></td></tr>'
             )
-            share_color = UP if item["count"] > 0 else MUTED
-            share_cell = f'<span style="color:{share_color};font-weight:700;">{share_txt}</span>'
-            row_style = ' style="background:#f0fdf4;"' if is_tcd else ""
-            rows_html += f'<tr{row_style}>{td_cell(name_cell)}{td_cell(esc(kw_txt))}{td_cell(share_cell, "right")}</tr>\n'
-        table_html = wrap_table(hdr, rows_html)
-
-        hypothesis = gen_aio_competitor_hypothesis(ranking, total_aio, label)
-        hypo_html = ""
-        if hypothesis:
-            hypo_html = (
-                f'<tr><td style="padding:10px 0 16px;">'
-                f'<p style="color:{TEXT};font-size:15px;line-height:1.8;margin:0;">{esc(hypothesis)}</p>'
-                f'</td></tr>'
-            )
-
-        return title_html + subtitle + f'<tr><td style="padding-bottom:8px;">{table_html}</td></tr>' + hypo_html
-
-    # ── 定点SERP観測 セクション（重点4キーワード） ──
-    def _point_watch_section() -> str:
-        pw = data.get("point_watch", [])
-        title_html = sec_title("5", "定点SERP観測（重点4キーワード）")
-        note_row = (
-            f'<tr><td style="padding-bottom:8px;">'
-            f'<p style="color:{MUTED};font-size:14px;margin:0;">'
-            f'「ブランディング会社 東京/大阪」「インナーブランディング会社 東京/大阪」の4キーワードを毎週定点観測し、'
-            f'AIOの有無・引用元の変化を追跡しています。'
-            f'</p></td></tr>'
-        )
-        if not pw:
-            return (
-                title_html + note_row +
+            hypothesis = gen_aio_competitor_hypothesis(ranking, total_aio, label)
+            if hypothesis:
+                competitor_block += (
+                    f'<tr><td style="padding:10px 0 16px;">'
+                    f'<p style="color:{TEXT};font-size:15px;line-height:1.8;margin:0;">{esc(hypothesis)}</p>'
+                    f'</td></tr>'
+                )
+        else:
+            competitor_block = (
                 f'<tr><td style="padding-bottom:16px;">'
                 f'<p style="color:{MUTED};font-size:15px;margin:0;">'
-                f'観測データなし（SERPAPI_API_KEY 未設定、または point_watch_queries 未設定）。</p></td></tr>'
+                f'競合（ブランディング/コンサル会社）は検出されませんでした。</p></td></tr>'
             )
-        rate = point_watch_aio_presence_rate(pw)
-        rate_row = ""
-        if rate is not None:
-            rate_row = (
-                f'<tr><td style="padding-bottom:10px;">'
-                f'<span style="color:{NAVY};font-size:15px;font-weight:700;">AIO表示率（定点観測4キーワード中）: {rate:.0f}%</span>'
-                f'</td></tr>'
-            )
-        hdr = (
-            th("キーワード", "left", "140") +
-            th("AIO有無", "center", "60") +
-            th("AIO変化", "center", "80") +
-            th("引用元変化", "center", "80") +
-            th("SERP安定度", "center", "80") +
-            th("新規引用ドメイン（誰が増えたか）") +
-            th("消失ドメイン")
+
+        ref_title_html = (
+            f'<tr><td style="padding-top:12px;padding-bottom:6px;">'
+            f'<div style="color:{NAVY};font-size:16px;font-weight:700;">AIO参考情報源</div>'
+            f'<p style="color:{MUTED};font-size:13px;margin:2px 0 8px;">'
+            f'銀行・行政・メディア等、ブランディング/コンサル会社以外の引用元（競合ではなく参考情報として分離）</p>'
+            f'</td></tr>'
         )
-        rows_html = ""
-        _STABILITY_COLOR = {"変化なし": MUTED, "軽微": "#e0a930", "大きい": DOWN, "初回観測": MUTED}
-        for r in pw:
-            aio_color = UP if r["aio_exists"] else MUTED
-            aio_txt   = "あり" if r["aio_exists"] else "なし"
-            chg_color = UP if r["aio_change"] not in ("変化なし",) else MUTED
-            if not r["has_previous"]:
-                cite_txt, cite_color = "初回観測", MUTED
-            elif r["citation_changed"]:
-                cite_txt, cite_color = "変化あり", DOWN
-            else:
-                cite_txt, cite_color = "変化なし", MUTED
-            stability_color = _STABILITY_COLOR.get(r["serp_stability"], MUTED)
-            new_d  = "・".join(esc(d) for d in r["new_domains"]) or "-"
-            lost_d = "・".join(esc(d) for d in r["lost_domains"]) or "-"
-            rows_html += (
-                "<tr>"
-                + td_cell(esc(r["query"]))
-                + td_cell(f'<span style="color:{aio_color};font-weight:700;">{aio_txt}</span>', "center")
-                + td_cell(f'<span style="color:{chg_color};">{esc(r["aio_change"])}</span>', "center")
-                + td_cell(f'<span style="color:{cite_color};font-weight:700;">{cite_txt}</span>', "center")
-                + td_cell(f'<span style="color:{stability_color};font-weight:700;">{esc(r["serp_stability"])}</span>', "center")
-                + td_cell(f'<span style="font-size:14px;">{new_d}</span>')
-                + td_cell(f'<span style="font-size:14px;color:{MUTED};">{lost_d}</span>')
-                + "</tr>\n"
+        if reference_sources:
+            ref_block = (
+                ref_title_html +
+                f'<tr><td style="padding-bottom:8px;">{_ranking_table_html(reference_sources[:10])}</td></tr>' +
+                (
+                    f'<tr><td style="padding-bottom:16px;">'
+                    f'<p style="color:{MUTED};font-size:12px;margin:0;">'
+                    f'※ 全{len(reference_sources)}件のうち上位10件を表示。</p></td></tr>'
+                    if len(reference_sources) > 10 else ""
+                )
             )
-        table_html = wrap_table(hdr, rows_html)
-        return title_html + note_row + rate_row + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
+        else:
+            ref_block = (
+                ref_title_html +
+                f'<tr><td style="padding-bottom:16px;">'
+                f'<p style="color:{MUTED};font-size:15px;margin:0;">参考情報源は検出されませんでした。</p></td></tr>'
+            )
+
+        return title_html + subtitle + competitor_block + ref_block
 
     # ── AIO Opportunity セクション ──
     def _aio_opportunity_section() -> str:
         opp = data.get("aio_opportunity", [])
-        title_html = sec_title("6", "AIO Opportunity")
+        title_html = sec_title("5", "AIO Opportunity")
         note_row = (
             f'<tr><td style="padding-bottom:8px;">'
             f'<p style="color:{MUTED};font-size:14px;margin:0;">'
@@ -2589,7 +3603,7 @@ def gen_html(data: dict, config: dict) -> str:
     # ── AIO Daily Summary セクション（aio_daily_monitor.py 連携） ──
     def _aio_daily_summary_section() -> str:
         summary = data.get("aio_daily_summary", {})
-        title_html = sec_title("7", "AIO Daily Summary")
+        title_html = sec_title("6", "AIO Daily Summary（日次AIO推移）")
         note_row = (
             f'<tr><td style="padding-bottom:8px;">'
             f'<p style="color:{MUTED};font-size:14px;margin:0;">'
@@ -2605,11 +3619,15 @@ def gen_html(data: dict, config: dict) -> str:
             )
         rate     = summary["aio_exists_rate"]
         tcd_rate = summary["tcd_cited_rate"]
+        observed_days = summary.get("observed_days", 0)
+        expected_days = summary.get("expected_days", 0)
+        coverage_rate = summary.get("coverage_rate", 0.0)
         stat_cells = [
+            ("観測日数",          f'{observed_days} / {expected_days}日（{coverage_rate*100:.0f}%）'),
             ("観測クエリ数",      str(summary["aio_query_count"])),
             ("AIO表示率",        f'{rate*100:.0f}%' if rate is not None else "-"),
             ("TCD引用率",        f'{tcd_rate*100:.0f}%' if tcd_rate is not None else "-"),
-            ("AIO本文変更件数",   str(summary["aio_text_changed_count"])),
+            ("前回観測からの本文変更件数", str(summary["aio_text_changed_count"])),
         ]
         if summary.get("error_count"):
             stat_cells.append(("エラー件数", str(summary["error_count"])))
@@ -2624,12 +3642,30 @@ def gen_html(data: dict, config: dict) -> str:
             f'style="border-collapse:collapse;border:1px solid {BORDER};border-radius:6px;overflow:hidden;">'
             f'<tr>{cells_html}</tr></table>'
         )
-        return title_html + note_row + f'<tr><td style="padding-bottom:16px;">{stat_table}</td></tr>'
+        warning_html = ""
+        if summary.get("is_reference_only"):
+            warning_html = (
+                f'<tr><td style="padding-top:8px;">'
+                f'<div style="background:#fff7e6;border-left:4px solid #e0a930;border-radius:0 6px 6px 0;'
+                f'padding:10px 16px;color:{TEXT};font-size:14px;">'
+                f'&#9888; 日次観測開始直後のため（観測{observed_days}日 < {AIO_DAILY_MIN_REFERENCE_DAYS}日）、'
+                f'AIO表示率・引用率は参考値です。'
+                f'</div></td></tr>'
+            )
+        elif not summary.get("supports_weekly_comparison"):
+            warning_html = (
+                f'<tr><td style="padding-top:8px;">'
+                f'<p style="color:{MUTED};font-size:13px;margin:0;">'
+                f'&#9432; 観測日数が{AIO_DAILY_MIN_COMPARISON_DAYS}日未満のため、AIO日次データの週次比較は行っていません。'
+                f'</p></td></tr>'
+            )
+        return title_html + note_row + f'<tr><td style="padding-bottom:16px;">{stat_table}</td></tr>' + warning_html
 
     # ── クエリ別AIO日次モニター セクション ──
     def _aio_query_daily_section() -> str:
-        query_level = data.get("aio_daily_summary", {}).get("query_level", [])
-        title_html = sec_title("8", "クエリ別AIO日次モニター")
+        aio_summary_ref = data.get("aio_daily_summary", {})
+        query_level = aio_summary_ref.get("query_level", [])
+        title_html = sec_title("7", "クエリ別AIO日次モニター")
         if not query_level:
             return (
                 title_html +
@@ -2637,14 +3673,25 @@ def gen_html(data: dict, config: dict) -> str:
                 f'<p style="color:{MUTED};font-size:15px;margin:0;">'
                 f'AIO日次データ未取得。</p></td></tr>'
             )
+        # 参考値注記は表の上に一度だけ（各セルへは繰り返さない）
+        note_row = ""
+        if aio_summary_ref.get("is_reference_only"):
+            obs = aio_summary_ref.get("observed_days", 0)
+            note_row = (
+                f'<tr><td style="padding-bottom:8px;">'
+                f'<p style="color:{MUTED};font-size:13px;margin:0;">'
+                f'※ 本表は観測{obs}日分の基準データです。表示率・引用率は参考値として扱います。'
+                f'</p></td></tr>'
+            )
         hdr = (
-            th("クエリ", "left", "160") +
+            th("クエリ", "left", "150") +
+            th("観測日数", "right", "70") +
             th("AIO表示日数", "right", "90") +
-            th("AIO表示率", "right", "80") +
+            th("AIO表示率", "right", "90") +
             th("TCD引用日数", "right", "90") +
             th("TCD言及日数", "right", "90") +
             th("最新ステータス", "center", "100") +
-            th("本文変更回数", "right", "90")
+            th("前回からの本文変更回数", "right", "90")
         )
         _STATUS_LABEL = {
             "OK_WITH_AIO": ("AIOあり", UP), "OK_NO_AIO": ("AIOなし", MUTED),
@@ -2653,10 +3700,12 @@ def gen_html(data: dict, config: dict) -> str:
         rows_html = ""
         for r in query_level:
             rate = f"{r['aio_exists_rate']*100:.0f}%" if r["aio_exists_rate"] is not None else "-"
+            observed_days = r.get("observed_days", 0)
             s_label, s_color = _STATUS_LABEL.get(r["latest_status"], (r["latest_status"], MUTED))
             rows_html += (
                 "<tr>"
                 + td_cell(esc(r["query"]))
+                + td_cell(str(observed_days), "right")
                 + td_cell(str(r["aio_exists_days"]), "right")
                 + td_cell(rate, "right")
                 + td_cell(str(r["tcd_cited_days"]), "right")
@@ -2666,51 +3715,60 @@ def gen_html(data: dict, config: dict) -> str:
                 + "</tr>\n"
             )
         table_html = wrap_table(hdr, rows_html)
-        return title_html + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
+        return title_html + note_row + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
 
-    # ── 引用ドメイン推移 セクション ──
-    def _aio_domain_trend_section() -> str:
-        trend = data.get("aio_domain_trend", {})
-        rows = trend.get("top_domains", []) + trend.get("lost_rows", [])
-        title_html = sec_title("9", "引用ドメイン推移")
-        if not rows:
-            return (
-                title_html +
-                f'<tr><td style="padding-bottom:16px;">'
-                f'<p style="color:{MUTED};font-size:15px;margin:0;">'
-                f'AIO引用ドメインデータ未取得。</p></td></tr>'
-            )
-        hdr = (
-            th("ドメイン", "left", "160") +
-            th("引用回数", "right", "70") +
-            th("対象クエリ") +
-            th("初出日", "center", "90") +
-            th("最終観測日", "center", "90") +
-            th("状態", "center", "70")
+    # ── AIO市場変化 セクション ──
+    def _citation_trends_player_table_html(rows: list[dict], label: str, color: str) -> str:
+        header_row = (
+            f'<tr><td style="padding-top:6px;padding-bottom:4px;">'
+            f'<span style="color:{color};font-size:14px;font-weight:700;">{esc(label)}</span></td></tr>'
         )
-        _STATUS_LABEL = {"new": ("🆕 新規", UP), "lost": ("⚠️ 消失", DOWN), "": ("-", MUTED)}
+        if not rows:
+            return header_row + (
+                f'<tr><td style="padding-bottom:10px;">'
+                f'<p style="color:{MUTED};font-size:14px;margin:0;">該当なし</p></td></tr>'
+            )
+        hdr = th("ドメイン", "left", "160") + th("引用回数", "right", "70") + th("対象クエリ")
         rows_html = ""
         for r in rows:
-            s_label, s_color = _STATUS_LABEL.get(r["status"], (r["status"], MUTED))
             queries = "・".join(esc(q) for q in r["related_queries"][:3]) or "-"
-            row_style = ' style="background:#fef2f2;"' if r["status"] == "lost" else ""
             rows_html += (
-                f"<tr{row_style}>"
-                + td_cell(esc(r["domain"]))
-                + td_cell(str(r["cited_count"]), "right")
-                + td_cell(f'<span style="font-size:14px;">{queries}</span>')
-                + td_cell(esc(r["first_seen"]), "center")
-                + td_cell(esc(r["last_seen"]), "center")
-                + td_cell(f'<span style="color:{s_color};font-weight:700;">{s_label}</span>', "center")
-                + "</tr>\n"
+                "<tr>" + td_cell(esc(r["domain"])) + td_cell(str(r["cited_count"]), "right")
+                + td_cell(f'<span style="font-size:14px;">{queries}</span>') + "</tr>\n"
             )
-        table_html = wrap_table(hdr, rows_html)
-        return title_html + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
+        return header_row + f'<tr><td style="padding-bottom:10px;">{wrap_table(hdr, rows_html)}</td></tr>'
+
+    def _aio_domain_trend_section() -> str:
+        ct = data.get("citation_trends", {})
+        title_html = sec_title("8", "AIO市場変化")
+        note_row = (
+            f'<tr><td style="padding-bottom:8px;">'
+            f'<p style="color:{MUTED};font-size:14px;margin:0;">'
+            f'引用ドメインの一覧ではなく、市場で誰の存在感が変化したか（継続・新規・消失）を示します。'
+            f'</p></td></tr>'
+        )
+        summary_lines = ct.get("trend_summary", [])
+        if ct.get("entity_note"):
+            summary_lines = summary_lines + [ct["entity_note"]]
+        if ct.get("weekly_snapshot_note"):
+            summary_lines = summary_lines + [ct["weekly_snapshot_note"]]
+        summary_html = "".join(check_row(s) for s in summary_lines)
+
+        # 日次AIO推移データが未取得の週は、継続/新規/消失の3表を空欄で並べても情報がないため省略する
+        if ct.get("no_current_observation"):
+            players_html = ""
+        else:
+            players_html = (
+                _citation_trends_player_table_html(ct.get("stable_players", []), "継続引用（安定した存在感）", MUTED)
+                + _citation_trends_player_table_html(ct.get("emerging_players", []), "新規引用（存在感が高まった可能性）", UP)
+                + _citation_trends_player_table_html(ct.get("disappeared_players", []), "引用消失（前週から存在感が低下）", DOWN)
+            )
+        return title_html + note_row + summary_html + players_html + f'<tr><td style="padding-bottom:12px;"></td></tr>'
 
     # ── AIO本文変化サマリー セクション ──
     def _aio_text_change_section() -> str:
         changes = data.get("aio_text_changes", {})
-        title_html = sec_title("10", "AIO本文変化サマリー")
+        title_html = sec_title("9", "AIO本文変化サマリー")
         note_row = (
             f'<tr><td style="padding-bottom:8px;">'
             f'<p style="color:{MUTED};font-size:14px;margin:0;">'
@@ -2740,7 +3798,7 @@ def gen_html(data: dict, config: dict) -> str:
     # ── 新規・更新ページのインデックス監視 セクション ──
     def _index_monitoring_section() -> str:
         idx_mon = data.get("index_monitoring", [])
-        title_html = sec_title("16", "新規・更新ページのインデックス監視")
+        title_html = sec_title("15", "新規・更新ページのインデックス監視")
         note_row = (
             f'<tr><td style="padding-bottom:8px;">'
             f'<p style="color:{MUTED};font-size:14px;margin:0;">'
@@ -2756,49 +3814,156 @@ def gen_html(data: dict, config: dict) -> str:
                 f'監視対象ページが未登録です。</p></td></tr>'
             )
         _STATUS_LABEL_HTML = {
-            "not_seen":              ("未検出", MUTED),
-            "indexed_no_impression": ("インデックス済・表示回数0", MUTED),
-            "impression_started":    ("表示開始", "#e0a930"),
-            "ranking_started":       ("クリック発生", UP),
+            "not_detected":        ("未検出", MUTED),
+            "indexed":             ("インデックス済（表示ごく僅か）", MUTED),
+            "gaining_impressions": ("Impression獲得中", "#e0a930"),
+            "gaining_clicks":      ("クリック発生", UP),
         }
         hdr = (
-            th("ページ", "left", "180") +
-            th("公開・更新日", "center", "100") +
-            th("初回表示検出", "center", "100") +
-            th("IMP", "right", "60") + th("Click", "right", "55") +
+            th("ページ", "left", "160") +
+            th("公開・更新日", "center", "90") +
+            th("経過日数", "center", "60") +
+            th("初回Imp", "center", "90") +
+            th("初回Click", "center", "90") +
+            th("Impression", "right", "70") + th("Click", "right", "55") +
             th("平均順位", "right", "65") +
-            th("ステータス", "center", "110")
+            th("ステータス", "center", "130")
         )
         rows_html = ""
         for p in idx_mon:
             s_label, s_color = _STATUS_LABEL_HTML.get(p["status"], (p["status"], MUTED))
-            first_seen = esc(p["first_seen_in_search_console"] or "-")
+            first_imp = esc(p["first_impression_date"] or "-")
+            first_clk = esc(p["first_click_date"] or "-")
+            days = f'{p["days_since_publish"]}日' if p["days_since_publish"] is not None else "-"
             rows_html += (
                 "<tr>"
                 + td_cell(f'<a href="{esc(p["url"])}" style="color:{NAVY};text-decoration:none;">{esc(p["page_title"])}</a>')
                 + td_cell(esc(p["published_or_updated_date"] or "-"), "center")
-                + td_cell(first_seen, "center")
-                + td_cell(fi(p["impressions"]), "right")
-                + td_cell(fi(p["clicks"]), "right")
-                + td_cell(fpos(p["average_position"]), "right")
+                + td_cell(days, "center")
+                + td_cell(first_imp, "center")
+                + td_cell(first_clk, "center")
+                + td_cell(fi(p["current_impressions"]), "right")
+                + td_cell(fi(p["current_clicks"]), "right")
+                + td_cell(fpos(p["current_position"]), "right")
                 + td_cell(f'<span style="color:{s_color};font-weight:700;">{s_label}</span>', "center")
                 + "</tr>\n"
             )
         table_html = wrap_table(hdr, rows_html)
         return title_html + note_row + f'<tr><td style="padding-bottom:16px;">{table_html}</td></tr>'
 
+    # ── ページ単体クエリ分析 セクション（地域ページ判定・AIOハブ候補判定） ──
+    def _page_query_watch_section() -> str:
+        pqw = data.get("page_query_watch", [])
+        title_html = sec_title("16", "ページ単体クエリ分析")
+        note_row = (
+            f'<tr><td style="padding-bottom:8px;">'
+            f'<p style="color:{MUTED};font-size:14px;margin:0;">'
+            f'ページ単体に絞り込んだ検索クエリから、地域ページとしての認識度・AIOハブ候補としての育ちを確認します'
+            f'（config/aio_monitor.yml の page_query_watch に対象ページを追加できます）。'
+            f'</p></td></tr>'
+        )
+        if not pqw:
+            return (
+                title_html + note_row +
+                f'<tr><td style="padding-bottom:16px;">'
+                f'<p style="color:{MUTED};font-size:15px;margin:0;">'
+                f'監視対象ページが未設定です。</p></td></tr>'
+            )
+
+        _REG_COLOR = {"confirmed": UP, "strengthening": UP, "weak": "#e0a930", "none": MUTED}
+        _HUB_COLOR = {"none": MUTED, "initial_signal": "#e0a930", "growing": UP, "established": UP}
+
+        blocks = ""
+        for analysis in pqw:
+            label = analysis["label"]
+            tc = analysis["totals_current"]
+            tp = analysis["totals_previous"]
+            reg = analysis["regional"]
+            hub = analysis["aio_hub"]
+            ref_s, ref_e = analysis["reference_period"]
+
+            page_title = (
+                f'<tr><td style="padding-top:14px;padding-bottom:6px;">'
+                f'<div style="color:{NAVY};font-size:16px;font-weight:700;">{esc(label)}単体の検索クエリ</div>'
+                f'<p style="color:{MUTED};font-size:12px;margin:2px 0 0;">'
+                f'{esc(analysis["url"])}<br>参考期間（90日目安）: {ref_s} 〜 {ref_e}（クエリ{len(analysis["ref_rows"])}件）'
+                f'</p></td></tr>'
+            )
+
+            totals_hdr = th("指標", "left", "120") + th("今週", "right", "90") + th("前週", "right", "90")
+            totals_rows = "".join([
+                "<tr>" + td_cell("クエリ数") + td_cell(str(tc["query_count"]), "right") + td_cell(str(tp["query_count"]), "right") + "</tr>",
+                "<tr>" + td_cell("クリック合計") + td_cell(fi(tc["clicks"]), "right") + td_cell(fi(tp["clicks"]), "right") + "</tr>",
+                "<tr>" + td_cell("表示回数合計") + td_cell(fi(tc["impressions"]), "right") + td_cell(fi(tp["impressions"]), "right") + "</tr>",
+                "<tr>" + td_cell("平均CTR") + td_cell(fp(tc["ctr"]), "right") + td_cell(fp(tp["ctr"]), "right") + "</tr>",
+                "<tr>" + td_cell("平均順位") + td_cell(fpos(tc["position"]), "right") + td_cell(fpos(tp["position"]), "right") + "</tr>",
+            ])
+            totals_table = (
+                f'<tr><td style="padding-bottom:10px;">{wrap_table(totals_hdr, totals_rows)}</td></tr>'
+            )
+
+            reg_color = _REG_COLOR.get(reg["status"], MUTED)
+            reg_lines = [
+                f'大阪・関西を含むクエリ数: {reg["query_count"]}件（表示回数 {fi(reg["impressions"])}、前週 {fi(reg["prv_impressions"])}）',
+                f'参考90日での地域クエリ数: {reg["ref_query_count"]}件',
+            ]
+            if reg["new_queries"]:
+                reg_lines.append(f'前週からの新規出現クエリ: {"・".join(reg["new_queries"])}')
+            if reg["moved_queries"]:
+                moved = "・".join(f'{r["query"]}({fpos_chg(r["position_diff"])})' for r in reg["moved_queries"])
+                reg_lines.append(f'順位が大きく動いたクエリ（±3位以上）: {moved}')
+            reg_block = (
+                f'<tr><td style="padding-top:8px;padding-bottom:4px;">'
+                f'<span style="color:{NAVY};font-size:14px;font-weight:700;">地域ページとしての認識: </span>'
+                f'<span style="color:{reg_color};font-size:14px;font-weight:700;">{_PQ_REGIONAL_STATUS_LABEL.get(reg["status"], reg["status"])}</span>'
+                f'</td></tr>'
+                + "".join(check_row(t) for t in reg_lines)
+            )
+
+            hub_color = _HUB_COLOR.get(hub["status"], MUTED)
+            hub_lines = [
+                f'一般語: {len(hub["general_rows"])}件 / 比較・選定系: {len(hub["comparison_rows"])}件 / 自然文: {len(hub["natural_language_rows"])}件',
+            ]
+            if hub["new_queries"]:
+                hub_lines.append(f'前週からの新規出現クエリ: {"・".join(hub["new_queries"])}')
+            hub_block = (
+                f'<tr><td style="padding-top:8px;padding-bottom:4px;">'
+                f'<span style="color:{NAVY};font-size:14px;font-weight:700;">AIOハブ候補としての広がり: </span>'
+                f'<span style="color:{hub_color};font-size:14px;font-weight:700;">{_PQ_AIO_HUB_STATUS_LABEL.get(hub["status"], hub["status"])}</span>'
+                f'</td></tr>'
+                + "".join(check_row(t) for t in hub_lines)
+                + (
+                    f'<tr><td style="padding:4px 0 8px;">'
+                    f'<p style="color:{MUTED};font-size:12px;margin:0;">'
+                    f'※ 自然文・比較クエリの出現はAI Overviewへの掲載を意味しません。会話型検索に近い検索意図が生まれている兆候として参考情報にとどめてください。'
+                    f'</p></td></tr>'
+                )
+            )
+
+            recs_block = (
+                f'<tr><td style="padding-top:8px;padding-bottom:4px;">'
+                f'<span style="color:{NAVY};font-size:14px;font-weight:700;">次の対応</span></td></tr>'
+                + "".join(check_row(t) for t in _page_query_recommendations(analysis))
+                + f'<tr><td style="padding-bottom:8px;"></td></tr>'
+            )
+
+            blocks += page_title + totals_table + reg_block + hub_block + recs_block
+
+        return title_html + note_row + blocks
+
+    market_presence_summary_html = _market_presence_summary_section()
     executive_summary_html = _executive_summary_section()
     ai_insights_html = _ai_insights_section()
     action_items_html = _action_items_section()
-    google_aio_html = _google_aio_section()
+    aio_competitor_status_html = _aio_competitor_status_section()
     aio_competitor_html = _aio_competitor_section()
-    point_watch_html = _point_watch_section()
     aio_opportunity_html = _aio_opportunity_section()
     aio_daily_summary_html = _aio_daily_summary_section()
     aio_query_daily_html = _aio_query_daily_section()
     aio_domain_trend_html = _aio_domain_trend_section()
     aio_text_change_html = _aio_text_change_section()
     index_monitoring_html = _index_monitoring_section()
+    page_query_watch_html = _page_query_watch_section()
 
     kw_table_html  = two_row_table(kw_active,  kw_name)
     svc_table_html = two_row_table(svc_active, page_name)
@@ -2845,6 +4010,9 @@ def gen_html(data: dict, config: dict) -> str:
 <tr><td style="padding:8px 40px 40px;">
 <table width="100%" cellpadding="0" cellspacing="0">
 
+<!-- 市場存在感サマリー -->
+{market_presence_summary_html}
+
 <!-- Executive Summary -->
 {executive_summary_html}
 
@@ -2864,58 +4032,58 @@ def gen_html(data: dict, config: dict) -> str:
 {sec_title("2", f"今{period_unit}の発見")}
 {findings_html}
 
-<!-- 3. Google AI Overview 観測 -->
-{google_aio_html}
+<!-- 3. AIO競合状況 -->
+{aio_competitor_status_html}
 
 <!-- 4. AIO競合ランキング -->
 {aio_competitor_html}
 
-<!-- 5. 定点SERP観測（重点4キーワード） -->
-{point_watch_html}
-
-<!-- 6. AIO Opportunity -->
+<!-- 5. AIO Opportunity -->
 {aio_opportunity_html}
 
-<!-- 7. AIO Daily Summary -->
+<!-- 6. AIO Daily Summary -->
 {aio_daily_summary_html}
 
-<!-- 8. クエリ別AIO日次モニター -->
+<!-- 7. クエリ別AIO日次モニター -->
 {aio_query_daily_html}
 
-<!-- 9. 引用ドメイン推移 -->
+<!-- 8. AIO市場変化 -->
 {aio_domain_trend_html}
 
-<!-- 10. AIO本文変化サマリー -->
+<!-- 9. AIO本文変化サマリー -->
 {aio_text_change_html}
 
-<!-- 11. 重点キーワード監視 -->
-{sec_title("11", "重点キーワード監視")}
+<!-- 10. 重点キーワード監視 -->
+{sec_title("10", "重点キーワード監視")}
 <tr><td style="padding-bottom:4px;">{kw_table_html}</td></tr>
 {kw_note}
 
-<!-- 12. サービス系 -->
-{sec_title("12", "サービス系")}
+<!-- 11. サービス系 -->
+{sec_title("11", "サービス系")}
 <tr><td style="padding-bottom:4px;">{svc_table_html}</td></tr>
 {svc_note}
 
-<!-- 13. サービスDefinition系 -->
-{sec_title("13", "サービスDefinition系")}
+<!-- 12. サービスDefinition系 -->
+{sec_title("12", "サービスDefinition系")}
 <tr><td style="padding-bottom:4px;">{aio_table_html}</td></tr>
 {aio_note}
 
-<!-- 14. マガジン系 -->
-{sec_title("14", "マガジン系")}
+<!-- 13. マガジン系 -->
+{sec_title("13", "マガジン系")}
 <tr><td style="padding-bottom:4px;">{def_table_html}</td></tr>
 {def_note}
 
-<!-- 15. 重要ページ監視 -->
-{sec_title("15", "重要ページ監視")}
+<!-- 14. 重要ページ監視 -->
+{sec_title("14", "重要ページ監視")}
 <tr><td style="padding-bottom:4px;"><p style="color:{MUTED};font-size:14px;margin:0 0 8px 0;">Search Console上の検索流入評価。実際のCV数ではありません（CV計測は将来GA4で実施）。</p></td></tr>
 <tr><td style="padding-bottom:4px;">{lp_table_html}</td></tr>
 {lp_note}
 
-<!-- 16. 新規・更新ページのインデックス監視 -->
+<!-- 15. 新規・更新ページのインデックス監視 -->
 {index_monitoring_html}
+
+<!-- 16. ページ単体クエリ分析 -->
+{page_query_watch_html}
 
 <!-- 17. 今週/月の仮説 -->
 {sec_title("17", f"今{period_unit}の仮説")}
@@ -2934,7 +4102,7 @@ def gen_html(data: dict, config: dict) -> str:
 
 <!-- Data Studio リンク -->
 <tr><td style="padding:40px 40px;text-align:center;border-top:1px solid {BORDER};">
-  <a href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a"
+  <a href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a/page/p_w254n6vx5d/edit"
      style="display:inline-block;padding:18px 24px;background:{NAVY};color:#fff;
             font-size:21px;font-weight:600;text-decoration:none;border-radius:5px;letter-spacing:.3px;">
     Data Studio で確認する →
@@ -3047,9 +4215,64 @@ def main() -> None:
             google_aio_data, gaio_previous, config.get("point_watch_queries", []),
             domain_aliases=config.get("domain_aliases", {}),
         )
+        aio_competitor_status_data = build_aio_competitor_status(
+            google_aio_data, gaio_previous, config.get("market_presence_queries", []),
+            domain_aliases=config.get("domain_aliases", {}),
+        )
     else:
         google_aio_data = []
         point_watch_data = []
+        aio_competitor_status_data = []
+        gaio_previous = None
+
+    # ページ単体クエリ分析（地域ページ判定・AIOハブ候補判定）
+    page_query_watch_data: list[dict] = []
+    pqw_cfg = config.get("page_query_watch", {})
+    if pqw_cfg.get("pages"):
+        print("ページ単体クエリ分析中...")
+        cls_cfg = pqw_cfg.get("classification", {})
+        regional_terms = cls_cfg.get("regional_terms", [])
+        comparison_terms = cls_cfg.get("comparison_terms", [])
+        nl_min_length = cls_cfg.get("natural_language_min_length", 20)
+        ref_end_dt = datetime.strptime(cur_end, "%Y-%m-%d")
+        ref_start_dt = ref_end_dt - timedelta(days=pqw_cfg.get("reference_days", 90) - 1)
+        ref_start_str = ref_start_dt.strftime("%Y-%m-%d")
+
+        gsc_dir = Path("data/gsc")
+        gsc_dir.mkdir(parents=True, exist_ok=True)
+
+        for page_cfg in pqw_cfg["pages"]:
+            page_url = page_cfg["url"]
+            label = page_cfg.get("label", page_url)
+            print(f"  {label} のクエリ取得中...")
+
+            def _page_query_df(s: str, e: str) -> pd.DataFrame:
+                rows = _fetch_rows(
+                    service, site_url, s, e, ["query"],
+                    dimension_filter={"dimension": "page", "operator": "equals", "expression": page_url},
+                )
+                return _to_df(rows, ["query"])
+
+            cur_page_df = _page_query_df(cur_start, cur_end)
+            prv_page_df = _page_query_df(prv_start, prv_end)
+            ref_page_df = _page_query_df(ref_start_str, cur_end)
+
+            analysis = pqa.analyze_page_query(
+                cur_page_df, prv_page_df, ref_page_df,
+                regional_terms, comparison_terms, nl_min_length,
+            )
+            analysis["label"] = label
+            analysis["url"] = page_url
+            analysis["reference_period"] = (ref_start_str, cur_end)
+            page_query_watch_data.append(analysis)
+
+            slug = page_cfg.get("slug", "page")
+            pd.DataFrame(pqa.build_period_records(analysis)).to_csv(
+                gsc_dir / f"{slug}_page_queries.csv", index=False, encoding="utf-8-sig"
+            )
+            pd.DataFrame(pqa.build_comparison_records(analysis)).to_csv(
+                gsc_dir / f"{slug}_page_queries_weekly_comparison.csv", index=False, encoding="utf-8-sig"
+            )
 
     # AIO日次モニター（aio_daily_monitor.py）データ読み込み
     print("AIO日次モニターデータ読み込み中...")
@@ -3057,19 +4280,27 @@ def main() -> None:
     aio_domains_df = load_aio_domains_daily_csv()
     aio_daily_summary = aggregate_aio_daily(aio_daily_df, cur_start, cur_end)
     aio_domain_trend = aggregate_aio_domain_trend(aio_domains_df, cur_start, cur_end, prv_start, prv_end)
+    _weekly_snapshot_ranking, _ = aio_competitor_ranking(google_aio_data, entity_types=config.get("domain_entity_types", {}))
+    _weekly_snapshot_competitors, _ = split_ranking_by_entity_type(_weekly_snapshot_ranking)
+    citation_trends = build_citation_trends(aio_domain_trend, config.get("domain_entity_types", {}), _weekly_snapshot_competitors)
     aio_text_changes = aggregate_aio_text_changes(aio_daily_df, cur_start, cur_end)
     print(f"  集計対象期間: {cur_start} 〜 {cur_end}")
     print(f"  AIO表示件数: {aio_daily_summary['aio_exists_count']} / TCD引用件数: {aio_daily_summary['tcd_cited_count']}")
 
     # 集計・分析
     print("データ集計中...")
+    key_kws_data = kw_compare(cur_queries, prv_queries, config.get("key_keywords", []))
+    market_presence_summary = build_market_presence_summary(
+        key_kws_data, google_aio_data, gaio_previous, config.get("market_presence_queries", []),
+    )
     data = {
         "periods": ((cur_start, cur_end), (prv_start, prv_end)),
         "totals": {
             "current": calc_totals(cur_pages),
             "previous": calc_totals(prv_pages),
         },
-        "key_kws": kw_compare(cur_queries, prv_queries, config.get("key_keywords", [])),
+        "key_kws": key_kws_data,
+        "market_presence_summary": market_presence_summary,
         "service_pages": page_compare(cur_pages, prv_pages, watching.get("サービス系", []), site_url),
         "aio_pages":     page_compare(cur_pages, prv_pages, watching.get("サービスDefinition系", []), site_url),
         "def_pages":     page_compare(cur_pages, prv_pages, watching.get("マガジン系", []), site_url),
@@ -3080,14 +4311,19 @@ def main() -> None:
         "top_pages":      top_pages_cmp(cur_pages, prv_pages, n=top_n),
         "google_aio":       google_aio_data,
         "point_watch":      point_watch_data,
+        "aio_competitor_status": aio_competitor_status_data,
         "aio_opportunity":  compute_aio_opportunity(google_aio_data, cur_queries),
         "index_monitoring": compute_index_monitoring(
-            config.get("new_index_watch", []) or [], cur_pages, prv_pages, site_url
+            config.get("new_index_watch", []) or [], cur_pages, prv_pages, site_url,
+            service=service, cur_end=cur_end,
         ),
         "aio_daily_summary": aio_daily_summary,
         "aio_domain_trend":  aio_domain_trend,
+        "citation_trends":   citation_trends,
         "aio_text_changes":  aio_text_changes,
+        "domain_entity_types": config.get("domain_entity_types", {}),
         "period_type":    actual_period,
+        "page_query_watch": page_query_watch_data,
     }
 
     # レポート生成

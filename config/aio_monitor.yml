@@ -17,7 +17,7 @@ key_keywords:
   - "ブランディング 会社 東京"
   - "ブランディング 会社 大阪"
   - "インナーブランディングとは"
-  - "インナーブランディング ブランディング 会社"
+  - "インナーブランディング 会社"
   - "インナーブランディング 会社 東京"
   - "インナーブランディング 会社 大阪"
 
@@ -51,6 +51,40 @@ domain_aliases:
     - "パドルデザインカンパニー"
     - "株式会社パドルデザインカンパニー"
     - "Paddle Design"
+  zeroin.co.jp:
+    - "zeroin.co.jp"
+    - "株式会社ゼロイン"
+  shanon.co.jp:
+    - "shanon.co.jp"
+    - "株式会社シャノン"
+  prdx.co.jp:
+    - "prdx.co.jp"
+    - "株式会社パラドックス"
+  ageha.tv:
+    - "ageha.tv"
+    - "株式会社揚羽"
+    - "株式会社揚羽（AGEHA Inc.）"
+    - "AGEHA Inc."
+  irischitose.co.jp:
+    - "irischitose.co.jp"
+    - "アイリスチトセ株式会社"
+
+# ──────────────────────────────────────────
+# AIO引用元ドメインのエンティティ分類
+# 集計キー（正規化後ドメイン）ごとに手動で分類する。
+# 未登録のドメインは "unknown" として扱われる（AIO参考情報源に分類される）。
+# entity_type: branding_company / consulting_company / client_company /
+#              media / public_institution / financial_institution / platform / unknown
+# ──────────────────────────────────────────
+domain_entity_types:
+  tcd.jp: "branding_company"
+  paddledesign.co.jp: "branding_company"
+  prdx.co.jp: "branding_company"
+  ageha.tv: "branding_company"
+  zeroin.co.jp: "consulting_company"
+  smbc.co.jp: "financial_institution"
+  mirasapo-plus.go.jp: "public_institution"
+  prtimes.com: "media"
 
 # ──────────────────────────────────────────
 # Google AI Overview 観測設定
@@ -83,16 +117,52 @@ point_watch_queries:
   - "インナーブランディング 会社 大阪"
 
 # ──────────────────────────────────────────
+# 市場存在感サマリー（レポート冒頭）
+# 対象市場ごとにSEO順位・AIO引用の週次方向性を1行サマリーで表示する。
+# key_keywords / google_aio.queries と重複するクエリを指定する。
+# ──────────────────────────────────────────
+market_presence_queries:
+  - "ブランディング 会社"
+  - "インナーブランディング 会社"
+  - "ブランディング 会社 東京"
+  - "インナーブランディング 会社 東京"
+  - "ブランディング 会社 大阪"
+  - "インナーブランディング 会社 大阪"
+
+# ──────────────────────────────────────────
 # 新規・更新ページのインデックス監視
 # 公開・更新した記事をここに追加すると、
 # Search Console上での表示開始状況をレポートで追跡します
 # ──────────────────────────────────────────
 new_index_watch:
-  []
+  - url: "https://tcd.jp/branding/03-news/osaka-branding-company.html"
+    title: "大阪でブランディング会社を選ぶ前に"
+    published_or_updated_date: "2026-07-07"
   # 記入例:
   # - url: "/branding/definition/example.html"
   #   title: "記事タイトル"
   #   published_or_updated_date: "2026-07-01"
+
+# ──────────────────────────────────────────
+# ページ単体クエリ分析（地域ページ判定・AIOハブ候補判定）
+# 指定ページに page フィルタで絞り込んだ検索クエリを毎週追跡する。
+# regional_terms に該当するクエリは「地域ページ」認識の判定に、
+# それ以外の一般語・比較語・自然文クエリは「AIOハブ候補」判定に使う。
+# ──────────────────────────────────────────
+page_query_watch:
+  classification:
+    regional_terms: ["大阪", "関西"]
+    comparison_terms: ["比較", "選び方", "違い", "おすすめ", "大手", "実績", "どちら", "どこ", "会社"]
+    natural_language_min_length: 20
+  reference_days: 90
+  pages:
+    - slug: "osaka"
+      label: "大阪ページ"
+      url: "https://tcd.jp/branding/03-news/osaka-branding-company.html"
+    # 記入例（公開後に追加）:
+    # - slug: "tokyo"
+    #   label: "東京ページ"
+    #   url: "https://tcd.jp/branding/03-news/tokyo-branding-company.html"
 
 # ──────────────────────────────────────────
 # レポート設定
