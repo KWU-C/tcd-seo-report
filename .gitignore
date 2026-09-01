@@ -13,8 +13,17 @@ preview.html
 # 生成レポート（任意でコミット対象にしたい場合はコメントアウト）
 reports/
 
+# v2 raw/正規化データ・生成レポート（再現可能な生成物のためコミット対象外）
+data_v2/raw/
+data_v2/processed/
+reports_v2/
+.pytest_cache/
+
 # AIO日次モニター実行ログ（各端末で生成されるためコミット対象外）
 logs/
+
+# Playwright MCPの一時スナップショット・ダウンロードファイル
+.playwright-mcp/
 
 # Python
 __pycache__/
