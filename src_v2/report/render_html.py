@@ -665,7 +665,7 @@ def render_html(vm: dict) -> str:
 {_appendix_html(vm["appendix"], header)}
 
 <section class="datastudio-link">
-  <a class="datastudio-button" href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a/page/p_w254n6vx5d/edit">Data Studio で確認する →</a>
+  <a class="datastudio-button" href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a/page/p_w254n6vx5d">Data Studio で確認する →</a>
 </section>
 </div>
 """
