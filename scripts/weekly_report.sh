@@ -38,7 +38,7 @@ echo "--- [3/5] narrative: Executive Summary執筆 (claude -p) ---"
 1. ${ANALYSIS_PATH} を読み込んでください。schema_version, period, data_quality, weeks_available, ga4_summary, findings(market/competitor/page/magazine_landing_page/initiativeの各category、severity、confidence、judgment、message、evidence等)を含む分析結果です。
 2. 経営者向けに、日本語で3ブロックの文章を、必ずこの順番で執筆してください。社内の意思決定者向けなので、各ブロックは短く簡潔にする（説明の重複・毎回同じ定型句の繰り返しを避ける）。表示順がアルファベット順と一致しないため、各ブロックの見出しはA/B/C等の記号を使わず「●」で統一する:
    - ● 今週の評価: 重点対応がある場合、対応ごとに3行で書く（フォーマットは4番を参照）。重点対応がなければ『断定的な施策変更を行うタイミングではない』の1文のみ
-   - ● 市場存在感: 重点4市場（ブランディング会社 東京/大阪、インナーブランディング会社 東京/大阪）それぞれの状態を一言で（横ばい/改善/悪化/未露出）
+   - ● 市場存在感: 重点4市場（ブランディング会社 東京/大阪、インナーブランディング会社 東京/大阪）それぞれの状態を一言で（横ばい/改善/悪化/未露出）。重点市場のクエリベース順位・表示回数は狭い重点クエリ群のみの数値であり、対応する地域LPページ（config_v2/pages.yamlでobjectiveにregionalを含むページ。現時点では大阪ページ https://tcd.jp/branding/03-news/osaka-branding-company.html）全体のGSC実績（analysis.jsonのfindings, category=pageまたはmagazine_landing_page）とは別の指標。両者に乖離がある場合（例: 重点クエリの順位は横ばいでもLPページ全体のクリック・表示回数が増加している等）は、経営判断の材料として両方を区別して一言添える（クエリ順位だけで市場を語らない）
    - ● AIO: 4市場中何件でTCDが引用されているかを1文。競合ドメインの動向は『④重点市場を参照』で済ませ、詳細を書かない（継続性が確認できているものだけを『参入』と呼ぶ。1回だけの新規引用は参入と書かない）
 3. 禁止事項（厳守）:
    - データから判断できない原因を断定しない
