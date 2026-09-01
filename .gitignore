@@ -40,3 +40,4 @@ env/
 # IDE
 .vscode/
 .idea/
+.codex/
