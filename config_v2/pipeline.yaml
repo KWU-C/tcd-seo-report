@@ -28,3 +28,9 @@ ga4:
     - key: service
       label: Service到達
       path_contains: "/service/"
+    - key: contact
+      label: 問い合わせページ到達
+      path_contains: "/contact"
+    - key: document_request
+      label: 資料請求ページ到達
+      path_contains: "/download"
