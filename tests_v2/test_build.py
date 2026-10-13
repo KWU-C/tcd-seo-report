@@ -26,11 +26,14 @@ def _write_analysis(tmp_path: Path) -> Path:
     return path
 
 
-def test_build_reports_without_narrative_uses_draft(tmp_path):
+def test_build_reports_writes_all_formats_with_current_sections(tmp_path):
     analysis_path = _write_analysis(tmp_path)
     paths = build_reports(analysis_path, output_root=tmp_path / "reports_v2")
-    md = paths["md"].read_text(encoding="utf-8")
-    assert "● 今週の評価" in md
+    assert set(paths) == {"json", "md", "html"}
+    for fmt in ("md", "html"):
+        out = paths[fmt].read_text(encoding="utf-8")
+        for heading in ("① サイト全体のアクセス状況", "② 今週の要点", "③ SEO検索順位", "④ AIO引用状況"):
+            assert heading in out
 
 
 def test_build_reports_with_narrative_file_overrides_summary(tmp_path):
@@ -44,4 +47,4 @@ def test_build_reports_with_narrative_file_overrides_summary(tmp_path):
 
     assert "今週は大きな変化はなく、データ蓄積を継続する段階です。" in md
     assert "今週は大きな変化はなく、データ蓄積を継続する段階です。" in html
-    assert "● 今週の評価" not in md
+    assert "② 今週の要点" in md

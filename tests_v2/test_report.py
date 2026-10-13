@@ -74,7 +74,11 @@ def _vm(findings):
     return build_view_model(_analysis(findings), thresholds_cfg=_THRESHOLDS, notes_cfg=[])
 
 
-# ── ③ 重点市場 ──────────────────────────────────────────────────
+# ── 重点キーワード（③SEO検索順位・④AIO引用状況・Appendixキーワード別詳細の元データ） ──
+
+def _cards(vm):
+    return [c for g in vm["priority_markets"]["groups"] for c in g["cards"]]
+
 
 def test_priority_markets_includes_market_and_nested_competitor():
     findings = [
@@ -82,7 +86,7 @@ def test_priority_markets_includes_market_and_nested_competitor():
         _finding("competitor-1", "competitor", "warning", "Medium", source={"query_id": "q1", "query": "市場クエリ"}),
     ]
     vm = _vm(findings)
-    cards = vm["priority_markets"]["cards"]
+    cards = _cards(vm)
     assert len(cards) == 1
     assert cards[0]["id"] == "market-1"
     assert [c["id"] for c in cards[0]["competitor_findings"]] == ["competitor-1"]
@@ -91,28 +95,13 @@ def test_priority_markets_includes_market_and_nested_competitor():
 def test_priority_markets_excludes_page_category():
     findings = [_finding("page-1", "page", "critical", "High", evidence=_page_evidence())]
     vm = _vm(findings)
-    assert vm["priority_markets"]["cards"] == []
+    assert _cards(vm) == []
     assert vm["priority_markets"]["table"] == []
 
 
-# ── ④ カテゴリ・ページ動向 ────────────────────────────────────────
-
-def test_category_summary_aggregates_by_group_and_category():
-    findings = [
-        _finding("page-1", "page", "info", "Low", judgment="継続観測",
-                 evidence=_page_evidence(group="service", category="service", cur_impr=100, cur_clicks=10)),
-        _finding("page-2", "page", "warning", "Low", judgment="再調査",
-                 evidence=_page_evidence(group="service", category="service", cur_impr=50, cur_clicks=2)),
-        _finding("page-3", "page", "info", "Medium", judgment="継続観測",
-                 evidence=_page_evidence(group="branding", category="definition", cur_impr=200, cur_clicks=20)),
-    ]
-    vm = _vm(findings)
-    labels = {s["label"]: s for s in vm["category_page_trends"]["category_summary"]}
-    assert labels["サービス案内系"]["page_count"] == 2
-    assert labels["サービス案内系"]["current"]["impressions"] == 150
-    assert labels["サービス案内系"]["current"]["clicks"] == 12
-    assert labels["マガジンDefinition系"]["page_count"] == 1
-
+# ── Appendix「少数データ・要確認以外のページ」の振り分け ─────────────────
+# 本文のカテゴリ別動向・順位変動上位は2026-09-28に削除済み。注目ページの判定は
+# Appendixのページ一覧（other_pages）から除外するかどうかにのみ使われている。
 
 def test_notable_page_requires_impressions_and_position_delta():
     # Impressions>=50 かつ 順位差>=3 → notable
@@ -122,23 +111,16 @@ def test_notable_page_requires_impressions_and_position_delta():
     small = _finding("page-small", "page", "info", "Low",
                       evidence=_page_evidence(cur_impr=5, prv_pos=20.0, cur_pos=10.0))
     vm = _vm([big, small])
-    notable_ids = {f["id"] for f in vm["category_page_trends"]["notable"]["improved"] + vm["category_page_trends"]["notable"]["declined"]}
     other_ids = {f["id"] for f in vm["appendix"]["other_pages"]}
-    assert "page-notable" in notable_ids
+    assert "page-notable" not in other_ids
     assert "page-small" in other_ids
-    assert "page-small" not in notable_ids
 
 
 def test_notable_page_click_delta_qualifies_even_with_low_impressions():
     f = _finding("page-clicks", "page", "warning", "Medium", judgment="再調査",
                  evidence=_page_evidence(cur_impr=5, cur_clicks=5, prv_clicks=1, prv_pos=10.0, cur_pos=10.0))
     vm = _vm([f])
-    notable_ids = {x["id"] for x in vm["category_page_trends"]["notable"]["improved"] + vm["category_page_trends"]["notable"]["declined"]}
-    other_ids = {x["id"] for x in vm["appendix"]["other_pages"]}
-    # position_deltaが0のためimproved/declinedには入らないが、Appendixにも落ちない
-    # （_is_notable_pageの条件は満たすが、top_moversはdeltaなしを除外するため）
-    assert "page-clicks" not in notable_ids
-    assert "page-clicks" not in other_ids
+    assert "page-clicks" not in {x["id"] for x in vm["appendix"]["other_pages"]}
 
 
 def test_notable_page_priority_market_url_always_included():
@@ -158,66 +140,15 @@ def test_notable_page_conversion_objective_always_included():
     assert "page-conv" not in {x["id"] for x in vm["appendix"]["other_pages"]}
 
 
-def test_top_movers_improved_sorted_descending():
-    findings = [
-        _finding(f"page-{i}", "page", "info", "Medium", judgment="継続観測",
-                 evidence=_page_evidence(cur_impr=100, prv_pos=20.0, cur_pos=20.0 - i))
-        for i in range(1, 8)
-    ]
-    vm = _vm(findings)
-    improved = vm["category_page_trends"]["notable"]["improved"]
-    assert len(improved) == 5
-    assert improved[0]["id"] == "page-7"  # 最大改善(delta=7)が先頭
-    assert improved[0]["position_delta"] == 7.0
+# ── Appendix「実装日未登録の施策」 ─────────────────────────────────
 
-
-def test_top_movers_declined_sorted_by_largest_drop():
-    findings = [
-        _finding("page-drop-big", "page", "warning", "Medium", judgment="再調査",
-                 evidence=_page_evidence(cur_impr=100, prv_pos=5.0, cur_pos=15.0)),
-        _finding("page-drop-small", "page", "warning", "Medium", judgment="再調査",
-                 evidence=_page_evidence(cur_impr=100, prv_pos=5.0, cur_pos=7.0)),
-    ]
-    vm = _vm(findings)
-    declined = vm["category_page_trends"]["notable"]["declined"]
-    assert declined[0]["id"] == "page-drop-big"
-
-
-# ── ⑤ 施策評価 ──────────────────────────────────────────────────
-
-def test_initiatives_split_known_and_unknown():
+def test_only_initiatives_without_implemented_date_are_listed_in_appendix():
     known = _finding("initiative-known", "initiative", "info", "Medium", judgment="効果確認待ち",
                       evidence={"implemented_at": "2026-07-01", "current": {}, "comparison": {}})
     unknown = _finding("initiative-unknown", "initiative", "info", "Not assessable", judgment="判断保留",
                         evidence={"name": "x", "status": "実装済み", "target": "y"})
     vm = _vm([known, unknown])
-    assert [f["id"] for f in vm["initiatives"]["known"]] == ["initiative-known"]
-    assert vm["initiatives"]["unknown_count"] == 1
     assert [f["id"] for f in vm["appendix"]["unknown_initiatives"]] == ["initiative-unknown"]
-
-
-# ── ⑥ 今週やること ──────────────────────────────────────────────
-
-def test_this_week_actions_selects_actionable_judgments_only():
-    findings = [
-        _finding("market-1", "market", "warning", "Medium", judgment="再調査", evidence=_market_evidence()),
-        _finding("page-1", "page", "warning", "Medium", judgment="継続観測", evidence=_page_evidence()),
-        _finding("initiative-1", "initiative", "info", "High", judgment="実施", evidence={"implemented_at": "2026-07-01"}),
-    ]
-    vm = _vm(findings)
-    ids = [f["id"] for f in vm["this_week_actions"]]
-    assert "market-1" in ids
-    assert "initiative-1" in ids
-    assert "page-1" not in ids
-
-
-def test_this_week_actions_capped_at_3():
-    findings = [
-        _finding(f"market-{i}", "market", "warning", "Medium", judgment="再調査", evidence=_market_evidence())
-        for i in range(8)
-    ]
-    vm = _vm(findings)
-    assert len(vm["this_week_actions"]) == 3
 
 
 # ── header / appendix ────────────────────────────────────────────
@@ -225,7 +156,7 @@ def test_this_week_actions_capped_at_3():
 def test_header_fields_present():
     vm = _vm([_finding("page-1", "page", "warning", "Medium", evidence=_page_evidence())])
     header = vm["header"]
-    for key in ("period", "comparison_available", "data_quality_status", "weeks_available"):
+    for key in ("period", "comparison_available", "data_quality_status", "data_quality_label", "weeks_available"):
         assert key in header
 
 
@@ -257,7 +188,8 @@ def test_render_json_md_html_reference_same_data():
     assert "施策メッセージ" in md_out
     assert "施策メッセージ" in html_out
 
-    for label in ("① サイトアクセス状況", "② 今週の結論", "③ 今週やること", "④ 重点市場", "⑤ カテゴリ別アクセス動向", "⑥ 施策評価"):
+    for label in ("① サイト全体のアクセス状況", "② 今週の要点", "③ SEO検索順位", "④ AIO引用状況",
+                  "キーワード別詳細", "実装日未登録の施策", "上位ランディングページ"):
         assert label in md_out
         assert label in html_out
 
@@ -269,12 +201,11 @@ def test_narrative_overrides_blocks_when_present():
     html_out = render_html(vm)
     assert "今週は大きな変化はなく、データ蓄積を継続する段階です。" in md_out
     assert "今週は大きな変化はなく、データ蓄積を継続する段階です。" in html_out
-    # 下書き（数値ベースの文言）はnarrative指定時は表示されない
-    assert "● 市場存在感" not in md_out
-    assert "● 市場存在感" not in html_out
+    # 数値から組み立てた要点はnarrative指定時は表示されない
+    assert vm["executive_summary"]["blocks"] == [] or vm["executive_summary"]["blocks"][0] not in md_out
 
 
-def test_this_week_actions_rendered_in_md_and_html():
+def test_keyword_recommendation_rendered_in_md_and_html():
     findings = [_finding("market-1", "market", "warning", "Medium", message="市場の変化", recommendation="市場対応",
                           judgment="再調査", evidence=_market_evidence())]
     vm = _vm(findings)
@@ -321,11 +252,10 @@ def test_landing_pages_excluded_list_passed_through():
     assert vm["appendix"]["landing_pages"]["excluded"][0]["url"] == "https://tcd.jp/branding/excluded.html"
 
 
-def test_landing_pages_not_mixed_into_other_pages_or_category_summary():
+def test_landing_pages_not_mixed_into_other_pages():
     findings = [_landing_finding(1, "https://tcd.jp/branding/a.html")]
     vm = _vm(findings)
     assert vm["appendix"]["other_pages"] == []
-    assert vm["category_page_trends"]["category_summary"] == []
 
 
 def test_render_md_and_html_include_landing_pages_in_appendix():

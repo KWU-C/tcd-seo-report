@@ -11,6 +11,8 @@ THRESHOLDS = {
         "position_change_meaningful": 2.0, "minimum_weeks_for_trend": 3,
     },
     "initiative_review": {"day14_after_implementation": 14, "day28_after_implementation": 28},
+    "market": {"weeks_per_month": 4.3, "min_impressions_ratio": 0.5},
+    "display": {"position_delta_flat": 1.0, "position_delta_minor": 3.0},
 }
 
 
@@ -90,14 +92,17 @@ QUERIES_CFG = {
 }
 
 
-def test_analyze_market_low_data_is_hold_judgment():
+def test_analyze_market_low_data_is_reference_only_not_reinvestigation():
+    # 最低Imp未満は、10位以下でも「再調査」にせず参考値として継続観測する
     bundle = _bundle(
         query_rows_cur=[{"query": "ブランディング 会社 東京", "clicks": 0, "impressions": 5, "ctr": 0.0, "position": 20.0}],
         query_rows_prv=[],
     )
     findings = market.analyze_market(bundle, None, QUERIES_CFG, THRESHOLDS)
     main = [f for f in findings if f["category"] == "market"][0]
-    assert main["judgment"] == "判断保留"
+    assert main["judgment"] == "継続観測"
+    assert "参考値" in main["message"]
+    assert not main.get("shortfall")
 
 
 def test_analyze_market_position_over_10_recommends_content_review():
