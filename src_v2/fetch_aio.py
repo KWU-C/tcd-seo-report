@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ from src_v2.schema import (
 
 RAW_DIR = Path("data_v2/raw/aio")
 PROVIDER = "serpapi"
+RETRY_WAIT_SECONDS = 2
+_NON_RETRIABLE_ERROR_MARKERS = ("api key", "api_key", "run out of searches", "account", "plan")
 
 
 def _now_iso() -> str:
@@ -39,6 +42,42 @@ def _save(record: dict, raw_dir: Path) -> Path:
     path = raw_dir / f"{ts_slug}_{query_slug}.json"
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def _has_content(ai_overview: dict | None) -> bool:
+    return bool(ai_overview and (ai_overview.get("references") or ai_overview.get("text_blocks")))
+
+
+def _observe(GoogleSearch, params: dict, api_key: str) -> tuple[dict, dict | None]:
+    """検索を1回実行し、AIO本文が別リクエスト扱いなら追加取得する。(search_result, ai_overview_result) を返す。
+
+    SerpAPIはAIO本文の代わりに ai_overview: {page_token, serpapi_link} だけを返すことがある
+    （本文は別リクエストで取得する仕様。page_tokenは短時間で失効するため直後に取得する）。
+    この場合に追加取得しないと、引用元が空のまま「AIO生成あり」と記録されてしまう。
+    """
+    search_result = GoogleSearch(params).get_dict()
+    ai_overview = search_result.get("ai_overview")
+    page_token = (ai_overview or {}).get("page_token") or search_result.get("ai_overview_page_token")
+    if _has_content(ai_overview) or not page_token:
+        return search_result, None
+    ai_overview_result = GoogleSearch({
+        "engine": "google_ai_overview",
+        "page_token": page_token,
+        "api_key": api_key,
+    }).get_dict()
+    return search_result, ai_overview_result
+
+
+def _should_retry(search_result: dict, ai_overview_result: dict | None) -> bool:
+    """追加取得を行ったのに本文が得られず、かつ再試行で回復しうるエラーの場合のみTrue。
+    APIキー不正・検索回数の上限・アカウント起因のエラーは再試行しても同じ結果になるため対象外。"""
+    if ai_overview_result is None:
+        return False  # 追加取得をしていない（本文取得済み、またはAIOなし）
+    followup_overview = ai_overview_result.get("ai_overview") or {}
+    if _has_content(followup_overview):
+        return False
+    error = str(ai_overview_result.get("error") or followup_overview.get("error") or "").lower()
+    return not any(marker in error for marker in _NON_RETRIABLE_ERROR_MARKERS)
 
 
 def _not_run_record(query: str, reason: str) -> dict:
@@ -102,25 +141,21 @@ def fetch_priority_queries(
         error_message: str | None
 
         try:
-            search_result = GoogleSearch(params).get_dict()
-            ai_overview = search_result.get("ai_overview")
-            ai_overview_result: dict | None = None
+            search_result, ai_overview_result = _observe(GoogleSearch, params, api_key)
+            previous_attempt = None
+            if _should_retry(search_result, ai_overview_result):
+                # 追加取得で本文が返らない主因は、SerpAPIのキャッシュ（同一検索は約1時間キャッシュされる）から
+                # 失効済みのpage_tokenが返ること。同じtokenの再送では回復しないため、no_cacheで検索からやり直す。
+                # 再試行は1回だけ。それでも取得できなければ「取得不可」のまま記録する（引用なしとは扱わない）。
+                time.sleep(cfg.get("retry_wait_seconds", RETRY_WAIT_SECONDS))
+                previous_attempt = {"search_result": search_result, "ai_overview_result": ai_overview_result}
+                search_result, ai_overview_result = _observe(GoogleSearch, {**params, "no_cache": "true"}, api_key)
 
-            # SerpAPIはAIO本文の代わりに ai_overview: {page_token, serpapi_link} だけを返すことがある
-            # （本文は別リクエストで取得する仕様。page_tokenは短時間で失効するため直後に取得する）。
-            # この場合に追加取得しないと、引用元が空のまま「AIO生成あり」と記録されてしまう。
-            has_content = bool(ai_overview and (ai_overview.get("references") or ai_overview.get("text_blocks")))
-            page_token = (ai_overview or {}).get("page_token") or search_result.get("ai_overview_page_token")
-            if not has_content and page_token:
-                ai_overview_result = GoogleSearch({
-                    "engine": "google_ai_overview",
-                    "page_token": page_token,
-                    "api_key": api_key,
-                }).get_dict()
-                ai_overview = ai_overview_result.get("ai_overview") or ai_overview
-
+            ai_overview = (ai_overview_result or {}).get("ai_overview") or search_result.get("ai_overview")
             status = ACQUISITION_STATUS_SUCCESS if ai_overview else ACQUISITION_STATUS_NOT_GENERATED
             raw_response = {"search_result": search_result, "ai_overview_result": ai_overview_result}
+            if previous_attempt:
+                raw_response["previous_attempt"] = previous_attempt
             error_message = None
         except Exception as e:  # noqa: BLE001 - SerpAPI例外の型が非公開のため広く捕捉し、failedとして記録する
             status = ACQUISITION_STATUS_FAILED
