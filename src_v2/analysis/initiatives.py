@@ -12,7 +12,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from src_v2 import normalize
-from src_v2.analysis.common import make_finding, sum_metrics
+from src_v2.analysis.common import (
+    SHORTFALL_COMPETITOR_SERP,
+    SHORTFALL_IMPLEMENTED_AT,
+    SHORTFALL_TARGET_PAGES,
+    make_finding,
+    sum_metrics,
+)
 from src_v2.analysis.confidence import assess_confidence
 
 _KEY_MAP = {
@@ -110,6 +116,7 @@ def analyze_initiatives(
                 message=f"「{name}」は実装日が未確認のため評価対象外（14日/28日評価をスキップ）",
                 recommendation="実装日が判明次第 docs/current-initiatives.md に追記してください",
                 judgment="判断保留",
+                shortfall=SHORTFALL_IMPLEMENTED_AT,
                 evidence={
                     "name": name,
                     "status": initiative.get("status"),
@@ -132,6 +139,7 @@ def analyze_initiatives(
                 message=f"「{name}」の実装日「{implemented_at_raw}」を日付として解釈できない",
                 recommendation="docs/current-initiatives.md の実装日をYYYY-MM-DD形式で記載してください",
                 judgment="判断保留",
+                shortfall=SHORTFALL_IMPLEMENTED_AT,
                 source={"initiative": name},
             ))
             continue
@@ -177,6 +185,7 @@ def analyze_initiatives(
                 message=f"「{name}」は28日評価時期を過ぎているが、対象ページを自動解決できないためシグナルを評価できない",
                 recommendation="docs/current-initiatives.md の対象記載を見直すか、手動で効果を確認してください",
                 judgment="判断保留",
+                shortfall=SHORTFALL_TARGET_PAGES,
                 evidence={"implemented_at": implemented_at_raw, "target_raw": initiative.get("target") or initiative.get("target_url")},
                 source={"initiative": name},
             ))
@@ -214,6 +223,7 @@ def analyze_initiatives(
                 message=f"「{name}」は28日経過。対象ページ群のクリックまたは表示回数が悪化（clicks {prv['clicks']}→{cur['clicks']}, impressions {prv['impressions']}→{cur['impressions']}）",
                 recommendation="効果が確認できないため、施策内容の再調査を検討する",
                 judgment="再調査",
+                shortfall=SHORTFALL_COMPETITOR_SERP,
                 evidence={"target_page_ids": target_ids, "current": cur, "comparison": prv},
                 source={"initiative": name},
             ))

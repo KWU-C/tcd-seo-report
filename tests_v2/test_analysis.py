@@ -378,3 +378,40 @@ def test_landing_pages_empty_without_candidates():
     bundle = _landing_bundle([])
     findings = landing_pages.analyze_landing_pages(bundle, None, THRESHOLDS)
     assert findings == []
+
+
+# ── 2026-10-13改善指示書: AIO引用元取得不可・低Impの判定 ─────────────
+
+def test_competitor_summary_skips_comparison_when_citations_unavailable():
+    # 引用元を取得できなかった週を「引用0件」として比較すると、全ドメインが新規／消失と誤判定される
+    ok = {"acquisition_status": "success", "aio_generated": True, "cited_domains": ["a.com"], "citation_status": "extracted"}
+    unavailable = {"acquisition_status": "success", "aio_generated": True, "cited_domains": [], "citation_status": "unavailable"}
+    assert market._competitor_summary(ok, unavailable)["comparison_available"] is False
+    current = market._competitor_summary(unavailable, ok)
+    assert current["comparison_available"] is False
+    assert current["current_count"] is None
+
+
+def test_competitor_summary_ignores_google_internal_links():
+    cur = {"acquisition_status": "success", "cited_domains": ["a.com", "Google", "Google"]}
+    prv = {"acquisition_status": "success", "cited_domains": ["a.com"]}
+    summary = market._competitor_summary(cur, prv)
+    assert summary["current_domains"] == ["a.com"]
+    assert summary["new_domains"] == []
+
+
+def test_judge_seo_low_impressions_is_not_judged_as_decline_or_reinvestigation():
+    from src_v2 import config_loader
+    thresholds = config_loader.load_thresholds()
+    current = {"impressions": 31, "clicks": 1, "ctr": 0.03, "position": 10.8}
+    severity, judgment, message, _, shortfall = market._judge_seo(current, {"position": 9.2}, thresholds, min_impressions=35)
+    assert (severity, judgment, shortfall) == ("info", "継続観測", None)
+    assert "参考値" in message and "下落" not in message
+
+
+def test_judge_seo_zero_impressions_is_gsc_no_data_not_index_issue():
+    from src_v2 import config_loader
+    thresholds = config_loader.load_thresholds()
+    _, judgment, message, _, _ = market._judge_seo({"impressions": 0, "clicks": 0, "ctr": 0, "position": None}, {}, thresholds, 50)
+    assert judgment == "表示なし"
+    assert message.startswith("GSCで表示データなし")

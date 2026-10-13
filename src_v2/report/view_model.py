@@ -6,15 +6,15 @@ Impressions下限）のみ config_v2/thresholds.yaml から読む（新しい分
 確定済みの値をそのまま使い、ここでは「どれを本文に出すか／どうグルーピングするか」
 という表示上の取捨選択のみ行う）。
 
-レポート構成（6セクション + Appendix。report.html改善指示書 3節。ユーザーフィードバックにより
-セクション順を変更済み。表示順の正本はrender_html.py/render_md.pyの実装）:
-  ① サイトアクセス状況（GA4）                … サイト全体/マガジン/Works/Service到達ユーザー
-  ② 今週の結論（Executive Summary）      … 3ブロック（今週の評価/市場存在感/AIO、この順。見出しは「●」統一）
-  ③ 今週やること（Priority Action）      … 最大3件
-  ④ 重点市場（4市場固定）                … 一覧表 + 折りたたみ詳細カード
-  ⑤ カテゴリ別アクセス動向               … カテゴリ別ロールアップ + 要確認ページのみ
-  ⑥ 施策評価                             … 実装日が判明している施策のみ本文表示
-  Appendix                               … 全Finding・低Confidence一覧・データ品質詳細等
+レポート構成（4セクション + Appendix。2026-10-13改善指示書で「全体アクセス → SEO順位 → AIO引用 → 詳細」
+の流れに再構成。表示順の正本はrender_html.py/render_md.py）:
+  ① サイト全体のアクセス状況（GA4） … 1段目: サイト全体/マガジン/Works/Service、2段目: 問い合わせ/資料請求
+  ② 今週の要点                      … 最大3項目（アクセス → SEO順位 → AIO引用）。数値の羅列ではなく変化を書く
+  ③ SEO検索順位                     … 重点4キーワードを1つの表で表示（順位・前週比・Imp・Click）
+  ④ AIO引用状況                     … 同じ4キーワードのAIO生成／TCD引用／主な引用元（最大3件）を独立した表で表示
+  Appendix                          … キーワード別詳細（クエリ内訳・AIO引用元全件・判定）・ページ別・未登録施策・データ品質等
+重点商談市場（deal）／テーマ市場（theme）の区分は内部データ（tier）として残し、見出しには出さない。
+参考クエリ（インナーブランディング会社×地域）はAppendixのキーワード別詳細に1行で表示する。
 
 render_md.py / render_html.py / render_json.py は、この関数が返す同一の
 View Modelだけを参照することで、出力形式間の内容差異を防ぐ。
@@ -74,9 +74,20 @@ def _display_flag(finding: dict) -> str | None:
     return None
 
 
+def judgment_label(finding: dict) -> str:
+    """「判断｜不足：X」または「判断｜要調査：X」形式の表示ラベル。どちらもなければ判断のみ。"""
+    judgment = finding.get("judgment") or "-"
+    shortfall = finding.get("shortfall")
+    if shortfall:
+        return f"{judgment}｜不足：{shortfall}"
+    investigate = finding.get("investigate")
+    return f"{judgment}｜要調査：{investigate}" if investigate else judgment
+
+
 def _annotate(finding: dict) -> dict:
     return {
         **finding,
+        "judgment_label": judgment_label(finding),
         "display_flag": _display_flag(finding),
         "display_message": _condensed_message(finding["message"]),
     }
@@ -106,7 +117,15 @@ def _category_label(group: str, category: str) -> str:
     return _CATEGORY_LABELS.get((group, category), f"{group}/{category}")
 
 
-# ── ② サイトアクセス状況（GA4） ─────────────────────────────────────
+_CV_GA4_SEGMENTS = ("contact", "document_request")
+
+# 重点市場の2階層（2026-09-30）。referenceは独立カードにせず、同じmarketのテーマ市場カードに参考行として添える
+_TIER_GROUPS = [("deal", "重点商談市場"), ("theme", "テーマ市場")]
+_REGION_ORDER = {"tokyo": 0, "osaka": 1}
+_MARKET_ORDER = {"branding": 0, "inner_branding": 1}
+
+
+# ── ① サイトアクセス状況（GA4） ─────────────────────────────────────
 
 def _build_site_usage(ga4_summary: dict) -> dict:
     segments = []
@@ -120,7 +139,10 @@ def _build_site_usage(ga4_summary: dict) -> dict:
             "current": cur, "comparison": prv, "delta_pct": delta_pct,
             "error": seg.get("error"),
         })
-    return {"segments": segments}
+    # 1段目: サイト全体・各セクション到達、2段目: CVに近いページ到達（問い合わせ・資料請求）
+    top = [seg for seg in segments if seg["key"] not in _CV_GA4_SEGMENTS]
+    cv = [seg for seg in segments if seg["key"] in _CV_GA4_SEGMENTS]
+    return {"segments": segments, "rows": [row for row in (top, cv) if row]}
 
 
 # ── ③ 重点市場（4市場固定・一覧表 + 詳細カード） ──────────────────
@@ -135,62 +157,134 @@ _SEO_STATUS_LABELS = [
 
 def _seo_status_label(position: float | None, impressions: int) -> str:
     if position is None or impressions == 0:
-        return "未露出"
+        return "表示なし"
     for threshold, label in _SEO_STATUS_LABELS:
         if threshold is None or position <= threshold:
             return label
     return "30位以下"
 
 
+def _market_label(evidence: dict) -> str:
+    """deal: 「ブランディング会社 東京」、theme: 「ブランディング」、reference: 「会社×東京」。"""
+    market = _MARKET_LABEL.get(evidence.get("market"), evidence.get("market") or "")
+    region = _REGION_LABEL.get(evidence.get("region"), evidence.get("region") or "")
+    tier = evidence.get("tier")
+    if tier == "theme":
+        return market
+    if tier == "reference":
+        return f"会社×{region}"
+    return f"{market}会社 {region}"
+
+
+def _short_label(evidence: dict) -> str:
+    """Executive Summary用。deal は地域名のみ（東京/大阪）、theme はテーマ名。"""
+    if evidence.get("tier") == "deal":
+        return _REGION_LABEL.get(evidence.get("region"), evidence.get("region") or "")
+    return _market_label(evidence)
+
+
+def _volume_label(evidence: dict) -> str | None:
+    volume = evidence.get("search_volume_ref")
+    return f"約{volume:,}" if volume else None
+
+
+_AIO_TOP_SOURCES = 3
+
+
+def _aio_view(evidence: dict) -> dict:
+    """④ AIO引用状況の1行分。AIO生成／TCD引用／引用元を別々の列にする。
+    未取得（観測なし・失敗）は「生成なし」と、引用元取得不可は「引用元なし」「TCD引用なし」と混同しない。"""
+    aio = evidence.get("aio") or {}
+    citations = evidence.get("aio_citations") or {}
+    domains = citations.get("domains")
+    if domains is None:  # aio_citations導入前のanalysis.json
+        domains = list(dict.fromkeys(d for d in (aio.get("cited_domains") or []) if d and d != "tcd.jp"))
+
+    view = {"aio_generated_label": "未取得", "tcd_cited_label": "—", "aio_sources_label": "—",
+            "aio_domains": domains, "tcd_cited": None, "citation_unavailable": False}
+    if aio.get("acquisition_status") not in ("success", "not_generated"):
+        return view
+    if not aio.get("aio_generated"):
+        return {**view, "aio_generated_label": "なし"}
+    if citations.get("status") == "unavailable":
+        # AIO枠はあるが本文を取得できていない。生成「あり」とは断定しない
+        return {**view, "aio_generated_label": "未確認", "tcd_cited_label": "判定不可",
+                "aio_sources_label": "取得不可（AIO本文・引用元を取得できず）", "citation_unavailable": True}
+
+    tcd_cited = bool(aio.get("tcd_cited"))
+    sources = "、".join(domains[:_AIO_TOP_SOURCES]) + (" など" if len(domains) > _AIO_TOP_SOURCES else "")
+    return {**view, "aio_generated_label": "あり", "tcd_cited_label": "あり" if tcd_cited else "なし",
+            "aio_sources_label": sources or "引用元なし", "tcd_cited": tcd_cited}
+
+
 def _build_priority_markets(market_findings: list[dict], competitor_by_query: dict[str, list[dict]], thresholds_cfg: dict) -> dict:
     display_cfg = thresholds_cfg["display"]
     low_impressions = thresholds_cfg["low_data"]["low_impressions"]
-    table = []
-    cards = []
+    rows_by_tier: dict[str, list[tuple[dict, dict]]] = {}
     for f in market_findings:
         evidence = f.get("evidence") or {}
         qid = (f.get("source") or {}).get("query_id")
         cur = evidence.get("current") or {}
-        aio = evidence.get("aio") or {}
         position = cur.get("position")
         impressions = cur.get("impressions") or 0
         clicks = cur.get("clicks") or 0
         delta = _position_delta(evidence)
-        # 表示回数が少ない場合は順位差を強調しない（report.html改善指示書 8節）
-        tier = delta_tier(delta, display_cfg) if impressions >= low_impressions else "flat"
-
-        aio_generated = aio.get("aio_generated")
-        tcd_cited = aio.get("tcd_cited")
-        if aio_generated and tcd_cited:
-            aio_status = "引用あり"
-        elif aio_generated:
-            aio_status = "未引用"
-        else:
-            aio_status = "AIO未生成"
+        min_impressions = evidence.get("min_impressions") or low_impressions
+        # 表示回数が市場ごとの最低Imp未満の場合は順位差を強調しない（一律50impは使わない）
+        tier = delta_tier(delta, display_cfg) if impressions >= min_impressions else "flat"
 
         competitor_summary = evidence.get("competitor_summary") or {}
-        table.append({
-            "market_label": f"{_MARKET_LABEL.get(evidence.get('market'), evidence.get('market'))} {_REGION_LABEL.get(evidence.get('region'), evidence.get('region'))}",
+        aio_view = _aio_view(evidence)
+        row = {
+            "tier": evidence.get("tier", "deal"),
+            "market": evidence.get("market"),
+            "market_label": _market_label(evidence),
+            "short_label": _short_label(evidence),
+            "volume_label": _volume_label(evidence),
             "query": evidence.get("query"),
             "seo_status": _seo_status_label(position, impressions),
             "position": position,
+            "prev_position": (evidence.get("comparison") or {}).get("position"),
             "position_delta": delta,
             "delta_tier": tier,
             "impressions": impressions,
             "clicks": clicks,
-            "aio_status": aio_status,
+            "min_impressions": min_impressions,
+            # AND一致（語順不問）で集計するキーワードは、関連クエリを含む集計であることを表示する
+            "includes_related_queries": bool(evidence.get("match_tokens")),
+            **aio_view,
             "competitor_comparison_available": competitor_summary.get("comparison_available", False),
             "judgment": f.get("judgment"),
-        })
-
-        cards.append({
+            "judgment_label": judgment_label(f),
+        }
+        card = {
             **f,
+            "card_title": row["market_label"],
+            "volume_label": row["volume_label"],
             "competitor_findings": competitor_by_query.get(qid, []),
             "position_delta": delta,
             "delta_tier": tier,
-        })
+        }
+        row["seo_movement"] = _seo_movement(row, thresholds_cfg)
+        row["delta_label"] = _delta_label(row)
+        card["aio_view"] = aio_view
+        rows_by_tier.setdefault(row["tier"], []).append((row, card))
 
-    return {"table": table, "cards": cards}
+    def _order(item: tuple[dict, dict]) -> tuple:
+        ev = item[1].get("evidence") or {}
+        return (_REGION_ORDER.get(ev.get("region"), 99), _MARKET_ORDER.get(ev.get("market"), 99))
+
+    references = sorted(rows_by_tier.get("reference", []), key=_order)
+    groups = []
+    for tier_key, label in _TIER_GROUPS:
+        items = sorted(rows_by_tier.get(tier_key, []), key=_order)
+        cards = []
+        for row, card in items:
+            if tier_key == "theme":
+                card["reference_rows"] = [r for r, _ in references if r["market"] == row["market"]]
+            cards.append(card)
+        groups.append({"key": tier_key, "label": label, "table": [r for r, _ in items], "cards": cards})
+    return {"groups": groups, "table": [r for g in groups for r in g["table"]]}
 
 
 # ── ④ カテゴリ・ページ動向 ────────────────────────────────────────
@@ -289,139 +383,135 @@ def _build_initiatives_section(initiative_findings: list[dict]) -> tuple[dict, l
     return {"known": sort_findings(known), "unknown_count": len(unknown)}, unknown
 
 
-# ── ⑥ 今週やること（Priority Action、最大3件） ────────────────────
+# ── ③ SEO検索順位の前週比表示 ─────────────────────────────────────
 
-def _action_target_label(f: dict) -> str:
-    source = f.get("source") or {}
-    if f["category"] == "market":
-        return source.get("query", f["id"])
-    if f["category"] == "competitor":
-        return f"{source.get('query', '')}（競合動向）"
-    if f["category"] == "page":
-        evidence = f.get("evidence") or {}
-        return evidence.get("title") or evidence.get("page_id") or f["id"]
-    if f["category"] == "initiative":
-        return source.get("initiative", f["id"])
-    return f["id"]
+RELATED_QUERIES_NOTE = "関連クエリを含む集計"
+_AIO_NOTE = "定点観測した検索結果（週1回・各キーワード1回）についての判定。Google検索全体で引用されていないという意味ではない。引用元の全件はAppendix。"
 
 
-def _action_score(f: dict, thresholds_cfg: dict) -> int:
-    """優先順位ルール（report.html改善指示書 3節⑤）: 重点市場への直接影響／
-    施策評価時期到達／十分な表示回数／問い合わせ導線への近さを加点する。
-    複数週継続した変化（AIO競合）は、analysisレイヤーでseverity=warningまで
-    昇格したものだけがこのactionable集合に入るため、単発変化は既に除外済み。
-    """
-    score = 0
-    category = f["category"]
-    evidence = f.get("evidence") or {}
-
-    if category == "market":
-        score += 3
-    if category == "initiative":
-        score += 3
-    if category == "competitor":
-        score += 2
-    if category == "page" and "conversion" in (evidence.get("objective") or []):
-        score += 1
-
-    low_impressions = thresholds_cfg["low_data"]["low_impressions"]
-    cur_impressions = (evidence.get("current") or {}).get("impressions")
-    if cur_impressions is not None and cur_impressions >= low_impressions:
-        score += 1
-
-    return score
+def _volume_as_of_label(as_of: str | None) -> str:
+    """"2026-07" → "2026年7月"。"""
+    if not as_of or "-" not in as_of:
+        return as_of or "-"
+    year, month = as_of.split("-")[:2]
+    return f"{year}年{int(month)}月"
 
 
-def _build_this_week_actions(all_sorted: list[dict], thresholds_cfg: dict, n: int = 3) -> list[dict]:
-    actionable = [f for f in all_sorted if f.get("judgment") in _ACTIONABLE_JUDGMENTS]
-    scored = sorted(actionable, key=lambda f: (-_action_score(f, thresholds_cfg), _sort_key(f)))
-    picked = scored[:n]
-    return [{**f, "action_target": _action_target_label(f)} for f in picked]
+def _seo_notes(volume_as_of: str | None) -> list[str]:
+    return [
+        f"「{RELATED_QUERIES_NOTE}」のキーワードは、指定した語をすべて含む検索クエリ（語順不問）の合算。内訳はAppendix。",
+        "Impが少ないキーワードの順位・前週比は参考値（改善・悪化の判定はしない）。",
+        f"月間検索Vol.は{_volume_as_of_label(volume_as_of)}時点の参考値。",
+    ]
 
 
-# ── ① 今週の結論（Executive Summary、下書き・数値ベース） ─────────
-
-def _market_presence_label(row: dict) -> str:
-    if row["impressions"] == 0:
-        return "未露出"
-    if row["delta_tier"] == "flat":
-        return "横ばい"
+def _seo_movement(row: dict, thresholds_cfg: dict) -> str:
+    """キーワードのSEO状態を 改善/悪化/横ばい/参考値 に分類する。
+    順位差がdisplay.position_delta_flat未満は横ばい。Impressionsがキーワードごとの最低Imp
+    （検索Vol.考慮。一律50impではない）未満は参考値（少数データの順位差を改善・悪化と呼ばない）。"""
+    if row["position"] is None or row["impressions"] < row["min_impressions"]:
+        return "参考値"
     delta = row["position_delta"]
-    if delta is not None and delta > 0:
-        return "改善"
-    return "悪化"
+    if delta is None or abs(delta) < thresholds_cfg["display"]["position_delta_flat"]:
+        return "横ばい"
+    return "改善" if delta > 0 else "悪化"
 
 
-def _action_observation(f: dict) -> str:
-    evidence = f.get("evidence") or {}
-    cur = evidence.get("current") or {}
-    if f["category"] in ("market", "page"):
-        prv = evidence.get("comparison") or {}
-        cur_pos, prv_pos = cur.get("position"), prv.get("position")
-        if cur_pos is not None and prv_pos is not None:
-            return f"{prv_pos:.1f}→{cur_pos:.1f}位（Imp {cur.get('impressions', 0)}, Click {cur.get('clicks', 0)}）"
-        if cur_pos is not None:
-            return f"{cur_pos:.1f}位（Imp {cur.get('impressions', 0)}, Click {cur.get('clicks', 0)}）"
-        return "Search Console上でデータなし"
-    if f["category"] == "initiative":
-        return evidence.get("name", "-")
-    if f["category"] == "competitor":
-        return evidence.get("domain", "-")
-    return f["display_message"]
+def _signed(value: float) -> str:
+    return f"{value:+.1f}".replace("-", "−")
 
 
-def _action_evaluation(f: dict) -> str:
-    judgment = f.get("judgment")
-    if judgment == "再調査" and f["category"] in ("market", "page"):
-        return "単週変動か継続的な変化かは未確定"
-    if judgment == "判断保留":
-        return "データ不足のため判断保留"
-    if judgment == "再調査" and f["category"] == "competitor":
-        return "複数週にわたる継続引用を確認"
-    return f.get("judgment") or "-"
+def _delta_label(row: dict) -> str:
+    """「+1.3 改善」「−1.7（参考値）」「+0.8（横ばい）」。表示なし・前週データなしは「—」。"""
+    delta = row["position_delta"]
+    if row["position"] is None or not row["impressions"] or delta is None:
+        return "—"
+    movement = row["seo_movement"]
+    if movement in ("改善", "悪化"):
+        return f"{_signed(delta)} {movement}"
+    return f"{_signed(delta)}（{movement}）"
 
 
-def _build_executive_summary(
-    market_table: list[dict],
-    this_week_actions: list[dict],
-) -> list[str]:
-    """今週の結論（下書き・数値ベース）。3ブロック（今週の評価/市場存在感/AIO、この順）。
-    表示順がアルファベット順と一致しないため、見出しはA/B/C等の記号ではなく「●」で統一する。
-    断定的な原因判定（「検索需要がない」等）は行わず、観測事実のみを述べる。
-    「今週の評価」は各アクションを「・観測（→評価／→次）」の3行に絞り、毎回同じ原因候補の列挙はしない。
-    （実運用ではClaude Codeがanalysis.jsonを見て経営者向け文章に書き換える。
-    build.py --narrative-file 未指定時のフォールバック）。
-    """
-    blocks: list[str] = []
+# ── ② 今週の要点 ────────────────────────────────────────────────
 
-    if this_week_actions:
-        action_lines = []
-        for a in this_week_actions:
-            # 「→」は「・」と縦位置を揃えるため全角スペース1つ分右にインデントする
-            action_lines.append(
-                f"・{a['action_target']}: {_action_observation(a)}\n　→{_action_evaluation(a)}\n　→{a['recommendation']}"
-            )
-        blocks.append("● 今週の評価\n\n" + "\n\n".join(action_lines))
-    else:
-        blocks.append("● 今週の評価\n断定的な施策変更を行うタイミングではなく、継続観測を優先する")
+def _access_highlight(site_usage: dict, thresholds_cfg: dict) -> str | None:
+    change_pct = thresholds_cfg["display"]["access_change_pct"]
+    segments = [s for s in site_usage.get("segments") or [] if not s.get("error") and s.get("current") is not None]
+    site = next((s for s in segments if s["key"] == "site_wide"), None)
+    if site is None:
+        return None
+    delta = site.get("delta_pct")
+    line = f"サイト全体は{site['current']:,}" + (f"（前週比{_signed(delta)}%）" if delta is not None else "") + "。"
 
-    presence_parts = [f"{row['market_label']}: {_market_presence_label(row)}" for row in market_table]
-    blocks.append("● 市場存在感\n" + "／".join(presence_parts))
-
-    cited = sum(1 for row in market_table if row["aio_status"] == "引用あり")
-    comparison_missing = market_table and not any(row["competitor_comparison_available"] for row in market_table)
-    c_line = f"● AIO\n重点{len(market_table)}市場すべてでAIOは生成されたが、TCD引用は{cited}件。"
-    if comparison_missing:
-        c_line += "今週は計測方法（対象期間の決定方法）を変更したため、競合比較は来週から再開する。"
-    else:
-        c_line += "競合ドメインの動向は④参照。"
-    blocks.append(c_line)
-
-    return blocks
+    others = [s for s in segments if s["key"] != "site_wide" and s.get("delta_pct") is not None]
+    up = [s["label"].removesuffix("到達") for s in others if s["delta_pct"] >= change_pct]
+    down = [s["label"].removesuffix("到達") for s in others if s["delta_pct"] <= -change_pct]
+    changes = []
+    if up:
+        changes.append(f"{'・'.join(up)}への到達は増加")
+    if down:
+        changes.append(f"{'・'.join(down)}への到達は減少")
+    return line + ("、".join(changes) if changes else "主要ページへの到達は横ばい") + "。"
 
 
-def build_view_model(analysis: dict, thresholds_cfg: dict | None = None) -> dict:
+def _seo_highlight(rows: list[dict]) -> str | None:
+    if not rows:
+        return None
+    moved, steady, hidden = [], [], []
+    for r in rows:
+        if r["position"] is None or not r["impressions"]:
+            hidden.append(r["short_label"])
+        elif r["seo_movement"] in ("改善", "悪化"):
+            moved.append(f"{r['short_label']}{r['position']:.1f}位に{r['seo_movement']}（前週{r['prev_position']:.1f}位）")
+        else:
+            steady.append(f"{r['short_label']}{r['position']:.1f}位（{r['seo_movement']}）")
+    sentences = ["、".join(moved) if moved else "重点キーワードに大きな順位変化なし"]
+    if steady:
+        sentences.append("、".join(steady))
+    if hidden:
+        sentences.append(f"{'・'.join(f'「{h}」' for h in hidden)}はGSCで表示データなし")
+    return "SEOは" + "。".join(sentences) + "。"
+
+
+def _aio_highlight(rows: list[dict]) -> str | None:
+    if not rows:
+        return None
+    cited = [r["short_label"] for r in rows if r["tcd_cited"]]
+    unavailable = [r["short_label"] for r in rows if r["citation_unavailable"]]
+    unavailable_note = f"{'・'.join(unavailable)}はAIO本文を取得できず判定不可" if unavailable else ""
+    if cited:
+        return f"AIOは{'・'.join(cited)}でTCD引用あり" + (f"（{unavailable_note}）" if unavailable_note else "") + "。"
+    return f"定点観測{len(rows)}クエリではTCDのAIO引用を確認できず" + (f"（うち{unavailable_note}）" if unavailable_note else "") + "。"
+
+
+def _build_highlights(site_usage: dict, priority_markets: dict, thresholds_cfg: dict) -> list[str]:
+    """今週の要点（最大3項目）。優先順位は アクセス → SEO順位 → AIO引用（2026-10-13改善指示書）。
+    analysis.jsonの数値から機械的に組み立て、原因の推測・提案は書かない。"""
+    rows = priority_markets["table"]
+    lines = [_access_highlight(site_usage, thresholds_cfg), _seo_highlight(rows), _aio_highlight(rows)]
+    return [line for line in lines if line]
+
+
+def _period_notes(notes_cfg: list[dict], section: str, cur_end: str) -> list[str]:
+    """config_v2/report_notes.yaml のうち、この対象期間に表示する注記（ISO日付の文字列比較）。"""
+    return [
+        n["text"] for n in notes_cfg
+        if n.get("section") == section and n.get("after_cur_end", "") < cur_end <= n.get("until_cur_end", "9999-12-31")
+    ]
+
+
+def _data_quality_label(status: str, rows: list[dict]) -> str:
+    """ヘッダーの「データ品質」。AIO本文を取得できなかったキーワードがある場合は、
+    pass（または warning）だけで終わらせず、判定不可の件数と対象を明示する。"""
+    unavailable = [r["short_label"] for r in rows if r["citation_unavailable"]]
+    if not unavailable:
+        return status
+    return f"{status}（AIO {len(rows)}件中{len(unavailable)}件は本文取得不可：{'・'.join(unavailable)}）"
+
+
+def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_cfg: list[dict] | None = None) -> dict:
     thresholds_cfg = thresholds_cfg or config_loader.load_thresholds()
+    notes_cfg = config_loader.load_report_notes() if notes_cfg is None else notes_cfg
     display_cfg = thresholds_cfg["display"]
 
     findings = analysis["findings"]
@@ -447,8 +537,9 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None) -> dict
         if url:
             priority_market_urls.add(url)
 
-    category_page_trends, other_pages = _build_category_page_trends(page_findings, thresholds_cfg, priority_market_urls)
-    initiatives_section, unknown_initiatives = _build_initiatives_section(initiative_findings)
+    # カテゴリ別動向・施策評価は本文から削除したが、Appendix（要確認以外のページ／未登録施策）には残す
+    _, other_pages = _build_category_page_trends(page_findings, thresholds_cfg, priority_market_urls)
+    _, unknown_initiatives = _build_initiatives_section(initiative_findings)
 
     site_usage = _build_site_usage(analysis.get("ga4_summary", {}))
 
@@ -459,13 +550,15 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None) -> dict
         "period": analysis["period"],
         "comparison_available": data_summary.get("gsc", {}).get("comparison_available"),
         "data_quality_status": data_quality["status"],
+        "data_quality_label": _data_quality_label(data_quality["status"], priority_markets["table"]),
         "weeks_available": analysis.get("weeks_available"),
         "low_impressions_threshold": thresholds_cfg["low_data"]["low_impressions"],
     }
 
-    this_week_actions = _build_this_week_actions(all_sorted, thresholds_cfg, n=3)
-
-    executive_summary = _build_executive_summary(priority_markets["table"], this_week_actions)
+    executive_summary = _build_highlights(site_usage, priority_markets, thresholds_cfg)
+    volume_as_of = next(
+        ((f.get("evidence") or {}).get("search_volume_as_of") for f in market_findings
+         if (f.get("evidence") or {}).get("search_volume_as_of")), None)
 
     excluded_landing_pages = data_summary.get("magazine_landing_pages", {}).get("excluded_urls", [])
 
@@ -481,6 +574,7 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None) -> dict
         "unknown_initiatives": unknown_initiatives,
         "data_quality": {
             **data_quality,
+            "label": header["data_quality_label"],
             "data_summary": data_summary,
             "gsc_counts": data_summary.get("gsc", {}),
             "aio_status": data_summary.get("aio", {}),
@@ -496,9 +590,11 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None) -> dict
         "header": header,
         "executive_summary": {"blocks": executive_summary, "narrative": None},
         "site_usage": site_usage,
-        "priority_markets": priority_markets,
-        "category_page_trends": category_page_trends,
-        "initiatives": initiatives_section,
-        "this_week_actions": this_week_actions,
+        "priority_markets": {
+            **priority_markets,
+            "search_volume_as_of": volume_as_of,
+            "seo_notes": _seo_notes(volume_as_of),
+            "aio_notes": _period_notes(notes_cfg, "aio", analysis["period"]["cur_end"]) + [_AIO_NOTE],
+        },
         "appendix": appendix,
     }

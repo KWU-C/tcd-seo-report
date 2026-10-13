@@ -17,12 +17,26 @@
 # 保守コストがかかるため。v2のPython実装を唯一の正とする）。
 #
 # query: AIO観測（SerpAPIへの実際の検索文字列）・レポート表示用の代表クエリ。
-#        GSCマッチングには使わない（all のみを使う）。
+#        GSCマッチングには使わない（all / exact のみを使う）。
+#
+# 【2026-09-30 2階層化】検索ボリュームの大小で「TCDの露出が少ない」のか
+# 「そもそも検索市場が小さい」のかを区別するため、市場を tier で分ける。
+#   tier: deal      … 重点商談市場（地域×ブランディング会社）。Executive Summary・カード対象
+#         theme     … テーマ市場（2語単体）。Executive Summary・カード対象
+#         reference … 参考クエリ（検索Vol.が小さいローカル複合語）。判定せず数値のみ参考表示
+# exact: テーマ市場用。正規化後のGSCクエリが exact のいずれかと完全一致するもののみ集計する
+#        （「ブランディング会社 東京」「商品ブランディング」等の異なる検索意図を混ぜないため）。
+# aio: false の市場はAIO観測（SerpAPI）対象外。SerpAPI件数は deal 2件 + theme 2件の計4件。
+# search_volume_ref: 月間検索ボリュームの参考値（search_volume_as_of 時点の取得値。最新値ではない）。
+search_volume_as_of: "2026-07"
+
 markets:
   branding_tokyo:
     query: "ブランディング 会社 東京"
     market: branding
     region: tokyo
+    tier: deal
+    search_volume_ref: 1000
     all:
       - ブランディング
       - 会社
@@ -31,6 +45,8 @@ markets:
     query: "ブランディング 会社 大阪"
     market: branding
     region: osaka
+    tier: deal
+    search_volume_ref: 300
     all:
       - ブランディング
       - 会社
@@ -39,6 +55,9 @@ markets:
     query: "インナーブランディング 会社 東京"
     market: inner_branding
     region: tokyo
+    tier: reference
+    search_volume_ref: 50
+    aio: false
     all:
       - インナーブランディング
       - 会社
@@ -47,10 +66,29 @@ markets:
     query: "インナーブランディング 会社 大阪"
     market: inner_branding
     region: osaka
+    tier: reference
+    search_volume_ref: 10
+    aio: false
     all:
       - インナーブランディング
       - 会社
       - 大阪
+  theme_branding:
+    query: "ブランディング"
+    market: branding
+    region: null
+    tier: theme
+    search_volume_ref: 50000
+    exact:
+      - ブランディング
+  theme_inner_branding:
+    query: "インナーブランディング"
+    market: inner_branding
+    region: null
+    tier: theme
+    search_volume_ref: 5000
+    exact:
+      - インナーブランディング
 
 # 補助的な市場把握用クエリ（地域を限定しない上位語）。
 # レポート冒頭の市場サマリー表示に使う参考値であり、施策判断の主対象にはしない。

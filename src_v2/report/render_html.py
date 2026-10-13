@@ -3,7 +3,8 @@
 render_md.pyと同じView Modelを参照し、同じFinding集合を表示する
 （Markdown/HTML間で内容差異が生じないようにするため）。
 
-レポート構成（6セクション + Appendix。report.html改善指示書 3節）。
+レポート構成（4セクション + Appendix。2026-10-13改善指示書）:
+① サイト全体のアクセス状況 → ② 今週の要点 → ③ SEO検索順位 → ④ AIO引用状況 → Appendix。
 判断に必要な情報を本文に残し、根拠の全件データはAppendix（<details>）へ移す。
 """
 from __future__ import annotations
@@ -11,9 +12,9 @@ from __future__ import annotations
 import re
 from html import escape
 
+from src_v2.report.view_model import RELATED_QUERIES_NOTE, judgment_label
+
 _SEVERITY_STATUS = {"critical": "critical", "warning": "warning", "info": "neutral"}
-_REGION_LABEL = {"tokyo": "東京", "osaka": "大阪"}
-_MARKET_LABEL = {"branding": "ブランディング", "inner_branding": "インナーブランディング"}
 
 
 def _esc(v) -> str:
@@ -31,8 +32,7 @@ def _judgment_chip(f: dict) -> str:
     """本文用: 状態（=judgment）のみ表示する。確度（confidence）はノイズになるため
     本文には出さず、Appendixでのみ表示する（ユーザーフィードバック①）。"""
     state = _SEVERITY_STATUS.get(f["severity"], "neutral")
-    judgment_label = f.get("judgment") or "-"
-    return _status_chip(judgment_label, state)
+    return _status_chip(judgment_label(f), state)
 
 
 def _judgment_confidence_html(f: dict) -> str:
@@ -48,129 +48,157 @@ def _fmt_num(n) -> str:
     return "-" if n is None else escape(str(n))
 
 
-# ── ① 今週の結論（Executive Summary） ──────────────────────────
+# ── ② 今週の要点 ────────────────────────────────────────────────
 
-_HEADING_RE = re.compile(r"^(●[^\n—-]*[^\n—\s-]|[A-F]\.[^\n—-]*[^\n—\s-])")
-
-
-def _paragraph_html(paragraph: str) -> str:
-    """「●見出し」（または旧形式のA〜F.見出し）ラベルのみ太字にする。見出し直後の
-    区切り（改行や「 — 」）はそのまま保持する（改行なら見出しの太字化後も改行として残す）。"""
-    m = _HEADING_RE.match(paragraph)
-    if not m:
-        return escape(paragraph)
-    heading = m.group(1)
-    rest = paragraph[len(heading):]
-    return f"<strong>{escape(heading)}</strong>{escape(rest)}"
+# AIOでのTCD引用は最重要指標のため、本文中の該当文言を赤字・太字で強調する（2026-09-30ユーザー指示）。
+# メール（Gmail）でも確実に効くよう、CSS変数ではなくインラインstyleで指定する。
+_AIO_CITED_PHRASES = ("TCD AIO引用あり", "AIOでTCD引用あり", "AIO引用あり", "TCD引用あり")
+_AIO_CITED_RE = re.compile("|".join(re.escape(p) for p in _AIO_CITED_PHRASES))
+_AIO_CITED_STYLE = "color:#d03b3b;font-weight:700"
 
 
-def _executive_summary_html(es: dict) -> str:
+def _highlight_aio_cited(text: str) -> str:
+    """textをエスケープし、「AIO引用あり」系の文言だけ赤字・太字にしたHTMLを返す。"""
+    parts, last = [], 0
+    for m in _AIO_CITED_RE.finditer(text):
+        parts.append(escape(text[last:m.start()]))
+        parts.append(f'<strong style="{_AIO_CITED_STYLE}">{escape(m.group(0))}</strong>')
+        last = m.end()
+    parts.append(escape(text[last:]))
+    return "".join(parts)
+
+
+def _highlights_html(es: dict) -> str:
     narrative = es.get("narrative")
     if narrative:
-        # 空行(\n\n)を段落境界とする。単一の\nは同じ段落内の改行として扱い、
-        # 行ごとに区切り線が入る（下線が多すぎる）状態を避ける。
+        # 空行(\n\n)を段落境界とする。単一の\nは同じ段落内の改行として扱う
         paragraphs = [p for p in narrative.strip().split("\n\n") if p.strip()]
-    else:
-        paragraphs = es["blocks"]
-    return "".join(f"<p>{_paragraph_html(block)}</p>" for block in paragraphs)
+        return "".join(f"<p>{_highlight_aio_cited(p)}</p>" for p in paragraphs)
+    return '<ul class="highlights">' + "".join(f"<li>{_highlight_aio_cited(line)}</li>" for line in es["blocks"]) + "</ul>"
 
 
-# ── ② サイトアクセス状況（GA4） ─────────────────────────────────────
+# ── ① サイト全体のアクセス状況（GA4） ─────────────────────────────────────
 
 def _site_usage_html(site_usage: dict) -> str:
     segments = site_usage.get("segments") or []
     if not segments:
         return "<p class='empty'>GA4データなし</p>"
 
-    tiles = []
-    for seg in segments:
-        if seg.get("error"):
-            tiles.append(f"""
+    rows_html = []
+    for row in site_usage.get("rows") or [segments]:
+        rows_html.append(f'<div class="stat-row stat-row-4">{"".join(_site_tile_html(seg) for seg in row)}</div>')
+    return "".join(rows_html)
+
+
+def _site_tile_html(seg: dict) -> str:
+    if seg.get("error"):
+        return f"""
         <div class="stat-tile">
           <div class="stat-label">{escape(seg['label'])}</div>
           <div class="stat-value-text">取得失敗</div>
-        </div>""")
-            continue
+        </div>"""
 
-        cur = seg.get("current")
-        delta_pct = seg.get("delta_pct")
-        delta_html = ""
-        if delta_pct is not None:
-            state = "good" if delta_pct >= 0 else "critical"
-            delta_html = f'<div class="stat-sub">{_status_chip(f"{delta_pct:+.1f}%", state)}（前期間比）</div>'
-        tiles.append(f"""
+    delta_pct = seg.get("delta_pct")
+    delta_html = ""
+    if delta_pct is not None:
+        state = "good" if delta_pct >= 0 else "critical"
+        delta_html = f'<div class="stat-sub">{_status_chip(f"{delta_pct:+.1f}%", state)}（前週比）</div>'
+    return f"""
         <div class="stat-tile">
           <div class="stat-label">{escape(seg['label'])}</div>
-          <div class="stat-value-num">{_fmt_num(cur)}</div>
+          <div class="stat-value-num">{_fmt_num(seg.get("current"))}</div>
           {delta_html}
-        </div>""")
-
-    return f'<div class="stat-row">{"".join(tiles)}</div>'
+        </div>"""
 
 
-# ── ③ 重点市場（4市場固定・一覧表 + 詳細カード） ──────────────────
+# ── ③ SEO検索順位（重点4キーワードを1つの表で表示） ──────────────────
 
-def _market_table_html(table: list[dict]) -> str:
-    if not table:
-        return "<p class='empty'>対象市場なし</p>"
+def _notes_html(notes: list[str]) -> str:
+    return '<ul class="table-notes">' + "".join(f"<li>{escape(n)}</li>" for n in notes) + "</ul>"
 
-    rows = []
-    for row in table:
-        delta = row["position_delta"]
-        tier = row["delta_tier"]
-        if row["position"] is None:
-            pos_html = _status_chip("-位", "neutral")
-        elif delta is None or tier == "flat":
-            pos_html = _status_chip(f"{row['position']:.1f}位", "neutral")
-        else:
-            arrow = "▲" if delta > 0 else "▼"
-            state = "neutral" if tier == "minor" else ("good" if delta > 0 else "critical")
-            pos_html = _status_chip(f"{arrow} {row['position']:.1f}位（{delta:+.1f}）", state)
 
-        aio_state = {"引用あり": "good", "未引用": "warning", "AIO未生成": "neutral"}.get(row["aio_status"], "neutral")
-
-        rows.append(f"""
-        <tr>
-          <td><strong>{escape(row['market_label'])}</strong></td>
-          <td>{escape(row['seo_status'])}</td>
-          <td>{pos_html}</td>
-          <td class="num">{row['impressions']}</td>
-          <td class="num">{row['clicks']}</td>
-          <td>{_status_chip(row['aio_status'], aio_state)}</td>
-          <td>{escape(row.get('judgment') or '-')}</td>
-        </tr>""")
-
+def _seo_table_html(pm: dict) -> str:
+    if not pm["table"]:
+        return "<p class='empty'>対象キーワードなし</p>"
     return f"""
     <table class="pages-table market-table">
       <thead>
-        <tr><th>市場</th><th>SEO状態</th><th>順位</th><th>Imp</th><th>Click</th><th>AIO</th><th>総合評価</th></tr>
+        <tr><th>キーワード</th><th class="num">月間検索Vol.（参考）</th><th class="num">平均順位</th><th>前週比</th><th class="num">Imp</th><th class="num">Click</th></tr>
       </thead>
-      <tbody>{"".join(rows)}</tbody>
-    </table>"""
+      <tbody>{"".join(_seo_row_html(row) for row in pm["table"])}</tbody>
+    </table>
+    {_notes_html(pm["seo_notes"])}"""
 
+
+def _seo_row_html(row: dict) -> str:
+    shown = row["position"] is not None and row["impressions"]
+    pos_html = f"{row['position']:.1f}" if shown else '— <span class="cell-note">GSCで表示データなし</span>'
+    # 色は改善・悪化と判定できた場合のみ（参考値・横ばいは無彩色）
+    state = {"改善": "good", "悪化": "critical"}.get(row["seo_movement"] if shown else "", "neutral")
+    related = f'<span class="cell-note">{escape(RELATED_QUERIES_NOTE)}</span>' if row.get("includes_related_queries") else ""
+    return f"""
+    <tr>
+      <td><strong>{escape(row['market_label'])}</strong>{related}</td>
+      <td class="num muted">{escape(row['volume_label'] or '-')}</td>
+      <td class="num">{pos_html}</td>
+      <td>{_status_chip(row['delta_label'], state)}</td>
+      <td class="num">{row['impressions']}</td>
+      <td class="num">{row['clicks']}</td>
+    </tr>"""
+
+
+# ── ④ AIO引用状況（同じ4キーワード。SEO順位とは別の表にする） ──────────
+
+def _aio_table_html(pm: dict) -> str:
+    if not pm["table"]:
+        return "<p class='empty'>対象キーワードなし</p>"
+    return f"""
+    <table class="pages-table market-table">
+      <thead>
+        <tr><th>キーワード</th><th>AIO生成</th><th>TCD引用</th><th>主な引用元</th></tr>
+      </thead>
+      <tbody>{"".join(_aio_row_html(row) for row in pm["table"])}</tbody>
+    </table>
+    {_notes_html(pm["aio_notes"])}"""
+
+
+def _aio_row_html(row: dict) -> str:
+    tcd_label = row["tcd_cited_label"]
+    if row["tcd_cited"]:
+        tcd_html = f'<strong style="{_AIO_CITED_STYLE}">{escape(tcd_label)}</strong>'
+    else:
+        tcd_html = _status_chip(tcd_label, "warning" if tcd_label == "なし" else "neutral")
+    sources_class = ' class="muted"' if row["citation_unavailable"] else ""
+    return f"""
+    <tr>
+      <td><strong>{escape(row['market_label'])}</strong></td>
+      <td>{escape(row['aio_generated_label'])}</td>
+      <td>{tcd_html}</td>
+      <td{sources_class}>{escape(row['aio_sources_label'])}</td>
+    </tr>"""
+
+
+# ── Appendix: キーワード別詳細（本文の表にある順位・Imp・Clickは繰り返さない） ──
 
 def _market_card_html(f: dict) -> str:
     evidence = f.get("evidence") or {}
-    query = evidence.get("query", "")
-    region_chip = _REGION_LABEL.get(evidence.get("region"), evidence.get("region") or "")
-    market_chip = _MARKET_LABEL.get(evidence.get("market"), evidence.get("market") or "")
     tokens = evidence.get("match_tokens") or []
-    cur = evidence.get("current") or {}
-    prv = evidence.get("comparison") or {}
+    exact = evidence.get("match_exact") or []
     variants = evidence.get("matched_query_variants") or []
-    aio = evidence.get("aio") or {}
-
-    tcd_cited = aio.get("tcd_cited")
-    cited_domains = [d for d in (aio.get("cited_domains") or []) if d and d != "tcd.jp"]
-    tcd_state = "good" if tcd_cited is True else ("warning" if tcd_cited is False else "neutral")
-    tcd_label = "TCD引用あり" if tcd_cited is True else ("TCD未引用" if tcd_cited is False else "AIO評価対象外")
+    aio_view = f.get("aio_view") or {}
+    cited_domains = aio_view.get("aio_domains") or []
 
     competitor_notes = ""
     for cf in f.get("competitor_findings", []):
         direction_state = "warning" if "new" in cf["id"] and cf["severity"] == "warning" else "neutral"
         competitor_notes += f'<div class="competitor-note">{_status_chip("競合動向", direction_state)} {escape(cf["display_message"] or "-")}</div>'
 
-    domain_chips = "".join(f'<span class="chip">{escape(d)}</span>' for d in cited_domains) or '<span class="chip chip-muted">引用ドメインなし</span>'
+    if aio_view.get("citation_unavailable"):
+        domain_chips = '<span class="chip chip-muted">取得不可（AIO本文・引用元を取得できず）</span>'
+    elif aio_view.get("aio_generated_label") != "あり":
+        domain_chips = f'<span class="chip chip-muted">AIO生成: {escape(aio_view.get("aio_generated_label") or "未取得")}</span>'
+    else:
+        domain_chips = "".join(f'<span class="chip">{escape(d)}</span>' for d in cited_domains) or '<span class="chip chip-muted">引用元なし</span>'
 
     if variants:
         variant_items = "".join(
@@ -180,104 +208,52 @@ def _market_card_html(f: dict) -> str:
     else:
         variants_html = "<p class='empty'>一致した実クエリなし</p>"
 
+    if exact:
+        match_html = f'一致条件（完全一致）: {" / ".join(escape(t) for t in exact)}'
+    else:
+        match_html = f'一致条件（AND・語順不問）: {" + ".join(escape(t) for t in tokens)}'
+
+    reference_html = ""
+    if f.get("reference_rows"):
+        items = []
+        for r in f["reference_rows"]:
+            pos = f"・{r['position']:.1f}位" if r["position"] is not None else ""
+            items.append(f"{escape(r['market_label'])} Vol.{escape(r['volume_label'] or '-')}（Imp {r['impressions']}{pos}）")
+        reference_html = f'<div class="reference-note">参考：{" ／ ".join(items)}</div>'
+
     return f"""
-    <details class="query-card" open>
-      <summary>
-        <span class="tag">{escape(market_chip)}</span><span class="tag">{escape(region_chip)}</span>
-        <strong>{escape(query)}</strong>
-        {_judgment_chip(f)}
-      </summary>
+    <div class="query-card">
+      <h4 class="card-title">{escape(f.get("card_title") or "")}</h4>
+      <div class="card-judgment">{_judgment_chip(f)}</div>
 
-      <div class="match-condition">一致条件（AND・語順不問）: {" + ".join(escape(t) for t in tokens)}</div>
-
-      <div class="stat-row">
-        <div class="stat-tile">
-          <div class="stat-label">順位</div>
-          <div class="stat-value-lg">{_position_stat_lg_html(
-              (cur or {}).get('position'), (prv or {}).get('position'), f.get('position_delta'), f.get('delta_tier', 'flat')
-          )}</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-label">Impressions</div>
-          <div class="stat-value-num">{cur.get('impressions', 0)}<span class="stat-sub"> (前週 {prv.get('impressions', 0)})</span></div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-label">Clicks</div>
-          <div class="stat-value-num">{cur.get('clicks', 0)}<span class="stat-sub"> (前週 {prv.get('clicks', 0)})</span></div>
-        </div>
-      </div>
-
-      <div class="chip-row">{_status_chip(tcd_label, tcd_state)}</div>
-
-      <div class="domains">
-        <div class="stat-label">AIO引用ドメイン（TCD以外）</div>
-        <div class="chip-row">{domain_chips}</div>
-      </div>
-
-      {competitor_notes}
+      <div class="match-condition">{match_html}</div>
 
       <div class="variants">
         <div class="stat-label">一致した実クエリ内訳（全件）</div>
         {variants_html}
       </div>
 
+      <div class="domains">
+        <div class="stat-label">AIO引用元（全件・TCD以外）</div>
+        <div class="chip-row">{domain_chips}</div>
+      </div>
+
+      {competitor_notes}
+
       <div class="verdict">
-        <div class="message">{escape(f['display_message'] or '-')}</div>
+        <div class="message">{_highlight_aio_cited(f['display_message'] or '-')}</div>
         <div class="judgment-line">推奨: {escape(f['recommendation'])}</div>
       </div>
-    </details>"""
+      {reference_html}
+    </div>"""
 
 
-def _priority_markets_html(pm: dict) -> str:
-    table_html = _market_table_html(pm["table"])
-    cards_html = "".join(_market_card_html(c) for c in pm["cards"])
-    return f"""{table_html}
-    <div class="card-grid">{cards_html}</div>"""
+def _keyword_details_html(pm: dict) -> str:
+    cards = "".join(_market_card_html(c) for g in pm["groups"] for c in g["cards"])
+    return f'<div class="card-grid">{cards}</div>' if cards else "<p class='empty'>対象キーワードなし</p>"
 
 
-# ── ④ カテゴリ・ページ動向 ────────────────────────────────────────
-
-def _category_summary_html(summary: list[dict]) -> str:
-    if not summary:
-        return "<p class='empty'>対象ページなし</p>"
-
-    rows = []
-    for s in summary:
-        cur, prv = s["current"], s["comparison"]
-        click_delta = cur["clicks"] - prv["clicks"]
-        delta_state = "good" if click_delta > 0 else ("critical" if click_delta < 0 else "neutral")
-        rows.append(f"""
-        <tr>
-          <td><strong>{escape(s['label'])}</strong></td>
-          <td>{prv['impressions']}→{cur['impressions']}</td>
-          <td>{prv['clicks']}→{cur['clicks']} {_status_chip(f'{click_delta:+d}', delta_state)}</td>
-        </tr>""")
-
-    return f"""
-    <table class="pages-table">
-      <thead><tr><th>カテゴリ</th><th>Imp変化</th><th>Click変化</th></tr></thead>
-      <tbody>{"".join(rows)}</tbody>
-    </table>"""
-
-
-def _position_stat_lg_html(cur_pos, prv_pos, delta, tier: str) -> str:
-    """③ 重点市場カードの「順位」タイル用。大きな現在値＋小さな前週比の添え書き
-    （旧デザインの.stat-value-lgスタイルを踏襲）。tier=flatの場合は矢印・色を付けない
-    （表示回数が少ない/変化が僅かな場合に順位差を強調しない）。
-    """
-    if cur_pos is None:
-        return _status_chip("-位", "neutral")
-    if prv_pos is None or delta is None:
-        return _status_chip(f"{cur_pos:.1f}位", "neutral")
-    if tier == "flat":
-        chip = _status_chip(f"{cur_pos:.1f}位", "neutral")
-    else:
-        arrow = "▲" if delta > 0 else "▼"
-        state = "neutral" if tier == "minor" else ("good" if delta > 0 else "critical")
-        chip = _status_chip(f"{arrow} {cur_pos:.1f}位", state)
-    sub = f'<span class="stat-sub"> (前週 {prv_pos:.1f}位、{delta:+.1f})</span>'
-    return chip + sub
-
+# ── ページ表示ヘルパー（重点市場カード・Appendixで使用） ──────────────
 
 def _position_delta_chip(evidence: dict) -> str:
     cur_pos = (evidence or {}).get("current", {}).get("position")
@@ -329,25 +305,6 @@ def _pages_table_html(findings: list[dict], show_confidence: bool = False) -> st
     </table>"""
 
 
-def _category_page_trends_html(cpt: dict, low_impressions_threshold: int) -> str:
-    notable = cpt["notable"]
-    return f"""
-    <h3>カテゴリ別</h3>
-    {_category_summary_html(cpt["category_summary"])}
-    <h3>要確認ページ</h3>
-    <p class="note">Impressions・順位差・クリック差が一定以上のページ、または重点市場の主対象URLのみ表示（※ Impressions {low_impressions_threshold}未満は参考値のため、それ以外はAppendix参照）。</p>
-    <div class="trend-band">
-      <h4>上昇</h4>
-      {_pages_table_html(notable["improved"])}
-    </div>
-    <div class="trend-band">
-      <h4>下落</h4>
-      {_pages_table_html(notable["declined"])}
-    </div>"""
-
-
-# ── ⑤ 施策評価 ──────────────────────────────────────────────────
-
 def _initiative_html(f: dict, show_confidence: bool = False) -> str:
     status_html = _judgment_confidence_html(f) if show_confidence else _judgment_chip(f)
     return f"""
@@ -356,39 +313,6 @@ def _initiative_html(f: dict, show_confidence: bool = False) -> str:
       <div class="message">{escape(f['display_message'] or '-')}</div>
       <div class="judgment">推奨: {escape(f['recommendation'])}</div>
     </li>"""
-
-
-def _initiatives_html(initiatives: dict) -> str:
-    known = initiatives["known"]
-    unknown_count = initiatives["unknown_count"]
-
-    parts = []
-    if unknown_count:
-        parts.append(f"<p class='note'>施策評価: 実装日未登録の{unknown_count}施策があるため評価不能（詳細はAppendix）</p>")
-    if known:
-        parts.append("<ul class=\"findings\">" + "".join(_initiative_html(f) for f in known) + "</ul>")
-    elif not unknown_count:
-        parts.append("<p class='empty'>評価対象の施策なし</p>")
-
-    return "".join(parts)
-
-
-# ── ⑥ 今週やること（Priority Action、最大3件） ────────────────────
-
-def _this_week_actions_html(actions: list[dict]) -> str:
-    if not actions:
-        return "<p class='empty'>今週追加で実施すべきアクションはなし（継続観測中心）。</p>"
-
-    items = []
-    for i, f in enumerate(actions, start=1):
-        items.append(f"""
-    <li class="finding priority-action">
-      <div class="action-head"><span class="action-index">{i}</span><strong>{escape(f['action_target'])}</strong></div>
-      {_judgment_chip(f)}
-      <div class="message">{escape(f['display_message'] or '-')}</div>
-      <div class="judgment">対応: {escape(f['recommendation'])}</div>
-    </li>""")
-    return '<ol class="findings priority-actions">' + "".join(items) + "</ol>"
 
 
 # ── Appendix ────────────────────────────────────────────────────
@@ -403,7 +327,7 @@ def _appendix_data_quality_html(dq: dict) -> str:
         errors_warnings = f"<li>データ品質errors: {escape(str(dq.get('errors', [])))}</li><li>データ品質warnings: {escape(str(dq.get('warnings', [])))}</li>"
     return f"""
     <ul>
-      <li>データ品質: {escape(dq.get('status', '-'))}</li>
+      <li>データ品質: {escape(dq.get('label', '-'))}</li>
       <li>GSC取得件数: クエリ{gsc.get('query_daily_rows', 0)} / ページ{gsc.get('page_daily_rows', 0)} / ページ×クエリ{gsc.get('page_query_daily_rows', 0)}</li>
       <li>AIO取得状況: {escape(str(aio))}</li>
       <li>Finding件数: {dq.get('finding_count', 0)}件（{escape(str(sev))}）</li>
@@ -447,7 +371,7 @@ def _appendix_landing_pages_html(landing_pages: dict) -> str:
     return table_html + excluded_html
 
 
-def _appendix_html(appendix: dict, header: dict) -> str:
+def _appendix_html(appendix: dict, pm: dict, header: dict) -> str:
     other_pages_html = _pages_table_html(appendix["other_pages"], show_confidence=True)
     unknown_initiatives_html = (
         "<ul class=\"findings\">" + "".join(_initiative_html(f, show_confidence=True) for f in appendix["unknown_initiatives"]) + "</ul>"
@@ -460,6 +384,9 @@ def _appendix_html(appendix: dict, header: dict) -> str:
     return f"""
     <details class="appendix">
       <summary>Appendix　※クリックして表示</summary>
+
+      <h3>キーワード別詳細（クエリ内訳・AIO引用元・判定）</h3>
+      {_keyword_details_html(pm)}
 
       <h3>データ品質</h3>
       {_appendix_data_quality_html(appendix["data_quality"])}
@@ -538,7 +465,7 @@ _STYLE = """
   h2 { font-size: 1.2rem; margin: 2.2rem 0 1rem; padding-bottom: .3rem; border-bottom: 1px solid var(--gridline); }
   h3 { font-size: 1rem; margin: 1.4rem 0 .6rem; }
   h4 { font-size: .9rem; margin: 1rem 0 .4rem; color: var(--text-secondary); }
-  /* ④ 要確認ページ「上昇」「下落」の帯（--page-planeで区切り、本文セクション内でも視覚的に独立させる） */
+  /* 帯表示（Appendix等で使用） */
   .trend-band { background: var(--market-surface); border-radius: 8px; padding: .8rem 1rem 1.1rem; margin-bottom: 1rem; }
   .trend-band h4 { margin-top: 0; }
   .trend-band table.pages-table { background: var(--surface-1); border-radius: 6px; padding: .4rem .6rem; }
@@ -550,15 +477,16 @@ _STYLE = """
 
   /* stat row / stat tile */
   .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .8rem; }
+  /* ① サイトアクセス状況: 4列固定（2段目の問い合わせ・資料請求も1段目と同じ幅で左詰め） */
+  .stat-row-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .stat-row-4 + .stat-row-4 { margin-top: .8rem; }
+  @media (max-width: 640px) { .stat-row-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .stat-tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: .7rem .9rem; }
   .stat-label { font-size: .72rem; color: var(--text-muted); margin-bottom: .3rem; }
   .stat-value { font-weight: 600; }
   .stat-value-num { font-weight: 600; font-size: 1.3rem; }
   .stat-value-text { font-weight: 600; font-size: .95rem; }
   .stat-sub { font-size: .74rem; color: var(--text-muted); font-weight: 400; }
-  /* SEO順位: Impressionsと同じ大きさで見せる（.status-chipは.8remで自己指定しているため個別に上書き） */
-  .stat-value-lg .status-chip { font-size: 1.3rem; font-weight: 600; gap: .5rem; white-space: normal; align-items: flex-start; line-height: 1.3; }
-  .stat-value-lg .status-chip .dot { width: 11px; height: 11px; margin-top: .3em; }
 
   /* status chip: color lives on the dot, never on the text */
   .status-chip { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; font-weight: 600; color: var(--text-primary); white-space: nowrap; }
@@ -575,13 +503,24 @@ _STYLE = """
   .tag { display: inline-block; font-size: .72rem; color: var(--text-muted); background: var(--chip-surface); border: 1px solid var(--border); border-radius: 4px; padding: .05rem .4rem; margin-right: .3rem; }
   .chip-row { margin: .5rem 0; }
 
-  /* ③ market table + cards */
-  table.market-table { margin-bottom: 1.2rem; }
-  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 1rem; }
+  /* 今週の要点 */
+  ul.highlights { margin: 0; padding-left: 1.2rem; }
+  ul.highlights li { padding: .3rem 0; }
+
+  /* SEO順位・AIO引用の表、Appendixのキーワード別詳細カード */
+  table.market-table { margin-bottom: .6rem; }
+  table.market-table td.muted { color: var(--text-muted); }
+  table.pages-table th.num { text-align: right; }
+  .cell-note { display: block; font-size: .72rem; font-weight: 400; color: var(--text-muted); }
+  td.num .cell-note { display: inline; margin-left: .3rem; }
+  ul.table-notes { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .74rem; color: var(--text-muted); line-height: 1.6; }
+  .reference-note { font-size: .74rem; color: var(--text-muted); border-top: 1px solid var(--gridline); margin-top: .7rem; padding-top: .5rem; }
+  /* 2列固定 */
+  .card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+  @media (max-width: 760px) { .card-grid { grid-template-columns: 1fr; } }
   .query-card { border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.2rem; background: var(--market-surface); }
-  .query-card > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; list-style: none; }
-  .query-card > summary::-webkit-details-marker { display: none; }
-  .query-card .stat-row { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); margin: .8rem 0 .6rem; }
+  .query-card .card-title { font-size: 1rem; margin: 0; color: var(--text-primary); }
+  .query-card .card-judgment { margin-top: .3rem; }
   .domains { margin: .6rem 0; }
   .competitor-note { font-size: .8rem; color: var(--text-secondary); margin: .4rem 0; display: flex; gap: .5rem; align-items: baseline; }
   .match-condition { font-size: .74rem; color: var(--text-muted); margin-top: .5rem; }
@@ -591,7 +530,7 @@ _STYLE = """
   .verdict { border-top: 1px solid var(--gridline); margin-top: .8rem; padding-top: .7rem; }
   .judgment-line { font-size: .85rem; margin-top: .4rem; color: var(--text-secondary); }
 
-  /* generic finding list (⑤ initiatives, ⑥ priority actions) */
+  /* generic finding list (Appendix) */
   ul.findings, ol.findings { list-style: none; padding-left: 0; }
   li.finding { border: 1px solid var(--border); border-radius: 8px; padding: .7rem .9rem; margin-bottom: .6rem; background: var(--surface-1); }
   li.priority-action { border-left: 3px solid var(--text-primary); }
@@ -616,7 +555,9 @@ _STYLE = """
   details.appendix > summary { cursor: pointer; font-weight: 600; }
 
   /* Data Studio リンクボタン */
-  .datastudio-link { text-align: center; padding: 1.6rem 1.4rem; }
+  /* Appendixは最下部。Data Studioリンクとの間隔は25px（appendix側のmargin-topは0にして相殺させない） */
+  .datastudio-link { text-align: center; padding: 1.6rem 1.4rem; margin-bottom: 25px; }
+  .datastudio-link + details.appendix { margin-top: 0; }
   .datastudio-button { display: inline-block; padding: .9rem 1.4rem; background: var(--text-primary); color: var(--surface-1); font-size: 1.05rem; font-weight: 600; text-decoration: none; border-radius: 6px; letter-spacing: .02em; }
 </style>
 """
@@ -629,44 +570,33 @@ def render_html(vm: dict) -> str:
     body = f"""
 <div class="report-root">
 <h1>TCD週次SEO/AIOレポート（{escape(period['cur_start'])} 〜 {escape(period['cur_end'])}）</h1>
-<p class="note">対象期間: {escape(period['cur_start'])}〜{escape(period['cur_end'])}（データ確定基準: 実行日-3日オフセット） ／ データ品質: {escape(header['data_quality_status'])} ／ 継続週数: {escape(str(header.get('weeks_available', '-')))}週</p>
+<p class="note">対象期間: {escape(period['cur_start'])}〜{escape(period['cur_end'])}（データ確定基準: 実行日-3日オフセット） ／ データ品質: {escape(header['data_quality_label'])} ／ 継続週数: {escape(str(header.get('weeks_available', '-')))}週</p>
 
 <section>
-  <h2>① サイトアクセス状況</h2>
+  <h2>① サイト全体のアクセス状況</h2>
   {_site_usage_html(vm["site_usage"])}
 </section>
 
 <section class="executive-summary">
-  <h2>② 今週の結論（Executive Summary）</h2>
-  {_executive_summary_html(vm["executive_summary"])}
+  <h2>② 今週の要点</h2>
+  {_highlights_html(vm["executive_summary"])}
 </section>
 
 <section>
-  <h2>③ 今週やること</h2>
-  {_this_week_actions_html(vm["this_week_actions"])}
+  <h2>③ SEO検索順位</h2>
+  {_seo_table_html(vm["priority_markets"])}
 </section>
 
 <section>
-  <h2>④ 重点市場</h2>
-  <div class="lede">TCDが追っているのは個別ページの順位そのものではなく、4つの重点市場でAIO・SEO双方で勝てているかどうか。詳細は各市場カードを開いて確認する。</div>
-  {_priority_markets_html(vm["priority_markets"])}
+  <h2>④ AIO引用状況</h2>
+  {_aio_table_html(vm["priority_markets"])}
 </section>
-
-<section>
-  <h2>⑤ カテゴリ別アクセス動向</h2>
-  {_category_page_trends_html(vm["category_page_trends"], header["low_impressions_threshold"])}
-</section>
-
-<section>
-  <h2>⑥ 施策評価</h2>
-  {_initiatives_html(vm["initiatives"])}
-</section>
-
-{_appendix_html(vm["appendix"], header)}
 
 <section class="datastudio-link">
-  <a class="datastudio-button" href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a/page/p_w254n6vx5d">Data Studio で確認する →</a>
+  <a class="datastudio-button" href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a/page/p_m2bpi11y5d" target="_blank" rel="noopener">Data Studio で確認する →</a>
 </section>
+
+{_appendix_html(vm["appendix"], vm["priority_markets"], header)}
 </div>
 """
 

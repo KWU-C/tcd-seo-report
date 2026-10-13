@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from src_v2.normalize import has_aio_content
 from src_v2.schema import (
     ACQUISITION_STATUS_FAILED,
     ACQUISITION_STATUS_NOT_GENERATED,
@@ -119,7 +120,30 @@ def validate_aio(records: list[dict], priority_queries: list[str]) -> tuple[list
             f"not_observed={counts[ACQUISITION_STATUS_NOT_OBSERVED]}"
         )
 
-    return [], warnings, {"aio_success_rate": success_rate, "aio_counts": counts}
+    # 「取得成功」でも中身（本文・引用元）が取れていないことがある（SerpAPIがpage_tokenのみ返却し、
+    # 追加取得も失敗した場合）。TCD引用の有無を判定できないため、passのままにせずwarningにする。
+    content_unavailable = [
+        r["query"] for r in records
+        if r["query"] in priority_queries and r["acquisition_status"] == ACQUISITION_STATUS_SUCCESS
+        and not _aio_content_retrieved(r)
+    ]
+    if content_unavailable:
+        warnings.append(
+            f"AIOの本文・引用元を取得できなかったクエリあり（{len(content_unavailable)}/{total}）: "
+            f"{'、'.join(content_unavailable)}。該当クエリのTCD引用は判定不可"
+        )
+
+    return [], warnings, {
+        "aio_success_rate": success_rate, "aio_counts": counts, "aio_content_unavailable": content_unavailable,
+    }
+
+
+def _aio_content_retrieved(record: dict) -> bool:
+    if not record.get("raw_response"):
+        return True  # raw未保持のレコードは中身を判定できないため対象外
+    raw = record["raw_response"]
+    candidates = [(raw.get("search_result") or {}).get("ai_overview"), (raw.get("ai_overview_result") or {}).get("ai_overview")]
+    return any(has_aio_content(c) for c in candidates)
 
 
 def _check_fetch_condition_repro(
@@ -188,6 +212,7 @@ def run_validation(
         "comparison_period": {"start": period["prv_start"], "end": period["prv_end"]},
         "aio_success_rate": aio_meta["aio_success_rate"],
         "aio_counts": aio_meta["aio_counts"],
+        "aio_content_unavailable": aio_meta["aio_content_unavailable"],
     }
 
     if status == DATA_QUALITY_FAIL:

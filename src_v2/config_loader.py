@@ -76,5 +76,13 @@ def load_pipeline_config(path: Path | str = CONFIG_DIR / "pipeline.yaml") -> dic
     return _load_yaml(Path(path))
 
 
+def load_report_notes(path: Path | str = CONFIG_DIR / "report_notes.yaml") -> list[dict]:
+    """レポートに期間限定で差し込む注記。ファイル不在時は注記なし。"""
+    path = Path(path)
+    if not path.exists():
+        return []
+    return (_load_yaml(path) or {}).get("notes") or []
+
+
 def enabled_pages(pages: list[dict]) -> list[dict]:
     return [p for p in pages if p.get("enabled")]

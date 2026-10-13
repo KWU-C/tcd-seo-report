@@ -7,7 +7,16 @@
 from __future__ import annotations
 
 from src_v2 import normalize
-from src_v2.analysis.common import group_metrics, make_finding, position_delta, sum_metrics, top_n_by
+from src_v2.analysis.common import (
+    SHORTFALL_COMPETITOR_SERP,
+    SHORTFALL_INDEX,
+    SHORTFALL_SAMPLE,
+    group_metrics,
+    make_finding,
+    position_delta,
+    sum_metrics,
+    top_n_by,
+)
 from src_v2.analysis.confidence import assess_confidence
 
 _SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
@@ -63,20 +72,26 @@ def analyze_pages(
 
         citing_queries = _aio_cites_page(normalized_page_url, aio_observations)
 
+        technical_issue = None
+        shortfall = None
         if not cur_rows and not prv_rows:
+            technical_issue = "gsc_not_detected"
             severity, judgment = "warning", "再調査"
             message = "Search Consoleデータで検出されない（表示回数ゼロ、またはインデックス未確認）"
             recommendation = "対象URLがインデックスされているか、正しいURLかを確認する"
+            shortfall = SHORTFALL_INDEX
         elif (cur["impressions"] or 0) < low_impressions and (cur["clicks"] or 0) < low_clicks:
             severity, judgment = "info", "判断保留"
             message = f"表示回数・クリック数が少なく参考値（impressions={cur['impressions']}, clicks={cur['clicks']}）"
             recommendation = "データ蓄積を待って再評価する"
+            shortfall = SHORTFALL_SAMPLE
         else:
             delta = position_delta(cur["position"], prv.get("position"))
             if delta is not None and delta <= -meaningful:
                 severity, judgment = "warning", "再調査"
                 message = f"順位が下落（{prv.get('position'):.1f}→{cur['position']:.1f}位）"
                 recommendation = "ページ×クエリで下落クエリを特定／検索結果のタイトル・descriptionを競合と比較／内部リンクを確認"
+                shortfall = SHORTFALL_COMPETITOR_SERP
             elif delta is not None and delta >= meaningful:
                 severity, judgment = "info", "継続観測"
                 message = f"順位が改善（{prv.get('position'):.1f}→{cur['position']:.1f}位）"
@@ -117,8 +132,10 @@ def analyze_pages(
                 "current": cur, "comparison": prv,
                 "top_queries": [{"query": q, **m} for q, m in top_queries],
                 "aio_citing_queries": citing_queries,
+                "technical_issue": technical_issue,
             },
             source={"page_id": page_id, "url": page["url"]},
+            shortfall=shortfall,
         ))
 
     return findings

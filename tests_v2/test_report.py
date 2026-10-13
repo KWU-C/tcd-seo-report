@@ -10,7 +10,7 @@ from src_v2.report.view_model import build_view_model
 
 _THRESHOLDS = {
     "low_data": {"low_impressions": 50, "low_clicks": 5, "position_change_meaningful": 2.0, "minimum_weeks_for_trend": 3},
-    "display": {"position_delta_flat": 1.0, "position_delta_minor": 3.0},
+    "display": {"position_delta_flat": 1.0, "position_delta_minor": 3.0, "access_change_pct": 5.0},
 }
 
 
@@ -71,7 +71,7 @@ def _analysis(findings):
 
 
 def _vm(findings):
-    return build_view_model(_analysis(findings), thresholds_cfg=_THRESHOLDS)
+    return build_view_model(_analysis(findings), thresholds_cfg=_THRESHOLDS, notes_cfg=[])
 
 
 # ── ③ 重点市場 ──────────────────────────────────────────────────
@@ -341,3 +341,100 @@ def test_render_md_and_html_include_landing_pages_in_appendix():
     assert "上位ランディングページ" in md_out and "上位ランディングページ" in html_out
     assert "excluded.html" in md_out and "excluded.html" in html_out
     assert "採用ページのため対象外" in md_out and "採用ページのため対象外" in html_out
+
+
+# ── 2026-10-13改善指示書: アクセス → SEO順位 → AIO引用 → Appendix ──────
+
+def _keyword_finding(id, label_region, cur_pos, prv_pos, cur_impr, min_impr=50, citations=None, tcd_cited=False, tier="deal"):
+    evidence = _market_evidence(cur_impr=cur_impr, cur_pos=cur_pos, prv_pos=prv_pos)
+    evidence.update({"region": label_region, "tier": tier, "min_impressions": min_impr, "search_volume_ref": 1000,
+                     "search_volume_as_of": "2026-07"})
+    evidence["aio"]["tcd_cited"] = tcd_cited
+    if citations is not None:
+        evidence["aio_citations"] = citations
+    return _finding(id, "market", "info", "Medium", judgment="継続観測", evidence=evidence)
+
+
+def _row(vm, region_label):
+    return next(r for r in vm["priority_markets"]["table"] if r["short_label"] == region_label)
+
+
+def test_sections_are_ordered_access_seo_aio_appendix():
+    vm = _vm([_keyword_finding("market-tokyo", "tokyo", 9.0, 10.3, 126,
+                               citations={"status": "extracted", "domains": ["a.com"]})])
+    for out in (render_markdown(vm), render_html(vm)):
+        positions = [out.index(h) for h in ("① サイト全体のアクセス状況", "② 今週の要点", "③ SEO検索順位", "④ AIO引用状況", "Appendix　※クリックして表示")]
+        assert positions == sorted(positions)
+        assert "重点商談市場" not in out and "テーマ市場" not in out
+
+
+def test_seo_delta_label_improved_and_low_impressions_is_reference_only():
+    vm = _vm([
+        _keyword_finding("market-tokyo", "tokyo", 9.0, 10.3, 126),
+        _keyword_finding("market-osaka", "osaka", 10.8, 9.2, 31, min_impr=35),
+    ])
+    assert _row(vm, "東京")["delta_label"] == "+1.3 改善"
+    # 最低Imp未満は1週間の順位差を「悪化」と呼ばない
+    assert _row(vm, "大阪")["delta_label"] == "−1.6（参考値）"
+    assert _row(vm, "大阪")["seo_movement"] == "参考値"
+
+
+def test_seo_row_without_impressions_is_shown_as_no_gsc_data():
+    vm = _vm([_keyword_finding("market-tokyo", "tokyo", None, None, 0)])
+    assert _row(vm, "東京")["delta_label"] == "—"
+    assert "GSCで表示データなし" in render_markdown(vm)
+    assert "GSCで表示データなし" in render_html(vm)
+
+
+def test_aio_citation_unavailable_is_not_reported_as_not_cited():
+    vm = _vm([_keyword_finding("market-tokyo", "tokyo", 9.0, 9.0, 126, citations={"status": "unavailable", "domains": []})])
+    row = _row(vm, "東京")
+    assert (row["aio_generated_label"], row["tcd_cited_label"]) == ("未確認", "判定不可")
+    assert "取得不可" in row["aio_sources_label"]
+    assert "東京はAIO本文を取得できず判定不可" in vm["executive_summary"]["blocks"][-1]
+
+
+def test_aio_sources_show_top_three_in_body_and_all_in_appendix():
+    domains = ["a.com", "b.com", "c.com", "d.com"]
+    vm = _vm([_keyword_finding("market-tokyo", "tokyo", 9.0, 9.0, 126, citations={"status": "extracted", "domains": domains})])
+    assert _row(vm, "東京")["aio_sources_label"] == "a.com、b.com、c.com など"
+    assert "d.com" in render_markdown(vm) and "d.com" in render_html(vm)
+
+
+def test_highlights_are_capped_at_three_and_start_with_access():
+    analysis = _analysis([_keyword_finding("market-tokyo", "tokyo", 9.0, 10.3, 126, tcd_cited=True,
+                                           citations={"status": "extracted", "domains": ["a.com"]})])
+    analysis["ga4_summary"] = {
+        "site_wide": {"label": "サイト全体", "current": 1387, "comparison": 1421},
+        "works": {"label": "Works到達", "current": 266, "comparison": 231},
+        "magazine": {"label": "マガジン到達", "current": 486, "comparison": 469},
+    }
+    blocks = build_view_model(analysis, thresholds_cfg=_THRESHOLDS)["executive_summary"]["blocks"]
+    assert len(blocks) == 3
+    assert blocks[0] == "サイト全体は1,387（前週比−2.4%）。Worksへの到達は増加。"
+    assert "東京9.0位に改善（前週10.3位）" in blocks[1]
+    assert blocks[2] == "AIOは東京でTCD引用あり。"
+
+
+def test_data_quality_label_names_keywords_whose_aio_content_was_not_retrieved():
+    vm = _vm([_keyword_finding("market-tokyo", "tokyo", 9.0, 9.0, 126, citations={"status": "unavailable", "domains": []})])
+    assert vm["header"]["data_quality_label"] == "pass（AIO 1件中1件は本文取得不可：東京）"
+    for out in (render_markdown(vm), render_html(vm)):
+        assert "pass（AIO 1件中1件は本文取得不可：東京）" in out
+
+
+def test_data_quality_label_is_plain_status_when_all_aio_content_retrieved():
+    vm = _vm([_keyword_finding("market-tokyo", "tokyo", 9.0, 9.0, 126, citations={"status": "extracted", "domains": ["a.com"]})])
+    assert vm["header"]["data_quality_label"] == "pass"
+
+
+def test_period_note_is_shown_only_for_reports_in_its_window():
+    notes = [{"section": "aio", "after_cur_end": "2026-07-20", "until_cur_end": "2026-07-26", "text": "前回判定の訂正"}]
+    finding = _keyword_finding("market-tokyo", "tokyo", 9.0, 9.0, 126)
+    shown = build_view_model(_analysis([finding]), thresholds_cfg=_THRESHOLDS, notes_cfg=notes)
+    assert shown["priority_markets"]["aio_notes"][0] == "前回判定の訂正"
+    assert "前回判定の訂正" in render_markdown(shown) and "前回判定の訂正" in render_html(shown)
+
+    expired = [{**notes[0], "until_cur_end": "2026-07-25"}]
+    hidden = build_view_model(_analysis([finding]), thresholds_cfg=_THRESHOLDS, notes_cfg=expired)
+    assert "前回判定の訂正" not in render_markdown(hidden)

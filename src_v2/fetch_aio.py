@@ -106,13 +106,18 @@ def fetch_priority_queries(
             ai_overview = search_result.get("ai_overview")
             ai_overview_result: dict | None = None
 
-            if not ai_overview and search_result.get("ai_overview_page_token"):
+            # SerpAPIはAIO本文の代わりに ai_overview: {page_token, serpapi_link} だけを返すことがある
+            # （本文は別リクエストで取得する仕様。page_tokenは短時間で失効するため直後に取得する）。
+            # この場合に追加取得しないと、引用元が空のまま「AIO生成あり」と記録されてしまう。
+            has_content = bool(ai_overview and (ai_overview.get("references") or ai_overview.get("text_blocks")))
+            page_token = (ai_overview or {}).get("page_token") or search_result.get("ai_overview_page_token")
+            if not has_content and page_token:
                 ai_overview_result = GoogleSearch({
                     "engine": "google_ai_overview",
-                    "page_token": search_result["ai_overview_page_token"],
+                    "page_token": page_token,
                     "api_key": api_key,
                 }).get_dict()
-                ai_overview = ai_overview_result.get("ai_overview")
+                ai_overview = ai_overview_result.get("ai_overview") or ai_overview
 
             status = ACQUISITION_STATUS_SUCCESS if ai_overview else ACQUISITION_STATUS_NOT_GENERATED
             raw_response = {"search_result": search_result, "ai_overview_result": ai_overview_result}

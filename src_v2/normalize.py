@@ -100,6 +100,14 @@ def matches_all_tokens(gsc_query: str, tokens: list[str]) -> bool:
     return bool(tokens) and all(normalize_query_text(tok) in normalized_gsc for tok in tokens)
 
 
+def matches_exact(gsc_query: str, candidates: list[str]) -> bool:
+    """正規化後のgsc_queryがcandidatesのいずれかと完全一致するか。
+    テーマ市場（「ブランディング」単体等）で、異なる検索意図を含む複合語を
+    集計に混ぜないために使う（queries.yaml markets.*.exact）。"""
+    normalized_gsc = normalize_query_text(gsc_query)
+    return any(normalize_query_text(c) == normalized_gsc for c in candidates)
+
+
 # ────────────────────────────────────────────────────────────────────
 # GSC processedテーブル生成（data-contract.md 4.1）
 # ────────────────────────────────────────────────────────────────────
@@ -225,6 +233,43 @@ def _resolve_domain(raw_domain_or_name: str, alias_lookup: dict[str, str]) -> st
     return alias_lookup.get(key, raw_domain_or_name)
 
 
+# citation_status: AIO生成時に引用元を取得できたかどうか（「引用元なし」と「引用元取得不可」を区別する）
+CITATION_EXTRACTED = "extracted"      # 引用元を1件以上取得
+CITATION_NONE = "none"                # AIO本文は取得できたが引用元は0件
+CITATION_UNAVAILABLE = "unavailable"  # AIO本文・引用元とも取得できていない（page_tokenのみ返却、追加取得で
+                                      # 「Google hasn't returned any results」等）。生成有無・TCD引用とも判定不可
+
+# Google内部リンク（google.com/searchviewer等。url抽出時に除外され、source名「Google」だけが残る）。
+# 競合ドメインの集計・表示には含めない（cited_domains自体は元データとして保持する）。
+_NON_COMPETITOR_SOURCES = {"google", "google.com", "google.co.jp"}
+
+
+def has_aio_content(ai_overview: dict | None) -> bool:
+    """SerpAPIのai_overviewに本文・引用元が実際に入っているか。
+    {"page_token": ..., "serpapi_link": ...} だけの応答は「AIOあり・内容は別リクエスト」で、中身は未取得。"""
+    ao = ai_overview or {}
+    return bool(ao.get("references") or ao.get("text_blocks") or ao.get("text"))
+
+
+def citation_status(obs: dict | None) -> str | None:
+    """aio_observationの引用元取得状況。AIO未生成・未取得の場合はNone。
+    citation_status導入前のnormalized.jsonは、引用元が1件もなければ取得不可とみなす
+    （当時の該当ケースはすべてpage_tokenのみの応答だったため）。"""
+    if not obs or obs.get("acquisition_status") != "success" or not obs.get("aio_generated"):
+        return None
+    if obs.get("citation_status"):
+        return obs["citation_status"]
+    return CITATION_EXTRACTED if (obs.get("cited_domains") or obs.get("cited_urls")) else CITATION_UNAVAILABLE
+
+
+def competitor_domains(obs: dict | None) -> list[str]:
+    """AIO引用ドメインのうち競合集計・表示に使うもの（引用順・重複除去、TCDとGoogle内部リンクを除外）。"""
+    return list(dict.fromkeys(
+        d for d in ((obs or {}).get("cited_domains") or [])
+        if d and d != "tcd.jp" and d.lower() not in _NON_COMPETITOR_SOURCES
+    ))
+
+
 def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = None) -> dict:
     """AIO raw record（fetch_aio.pyの出力）を data-contract.md 4.2 の
     aio_observation スキーマへ変換する。ドメイン抽出・alias正規化・TCD引用判定は
@@ -239,21 +284,24 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
     cited_domains: list[str] = []
     cited_urls: list[str] = []
     answer_text_hash: str | None = None
+    cite_status: str | None = None
+    content_error: str | None = None
 
     if status == "success":
         aio_generated = True
         raw_response = record.get("raw_response") or {}
         search_result = raw_response.get("search_result") or {}
         ai_overview_result = raw_response.get("ai_overview_result")
-        ai_overview = search_result.get("ai_overview") or (
-            (ai_overview_result or {}).get("ai_overview")
-        ) or {}
+        # 本文・引用元が入っている方を使う（検索結果側がpage_tokenのみの場合は追加取得結果）
+        candidates = [search_result.get("ai_overview"), (ai_overview_result or {}).get("ai_overview")]
+        ai_overview = next((c for c in candidates if has_aio_content(c)), None) or {}
 
         text = ai_overview.get("text", "") or ""
         if text:
             answer_text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-        tcd_cited = False
+        # 中身を取得できていない場合、TCD引用の有無は判定できない（False＝引用なしと混同しない）
+        tcd_cited = False if ai_overview else None
         for ref in ai_overview.get("references", []):
             if isinstance(ref, str):
                 url, src_name = ref, ""
@@ -276,6 +324,13 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
                 if url:
                     tcd_urls.append(url)
 
+        if not ai_overview:
+            cite_status = CITATION_UNAVAILABLE
+            followup = (ai_overview_result or {})
+            content_error = followup.get("error") or (followup.get("ai_overview") or {}).get("error")
+        else:
+            cite_status = CITATION_EXTRACTED if (cited_domains or cited_urls) else CITATION_NONE
+
     elif status == "not_generated":
         aio_generated = False
         tcd_cited = None
@@ -292,8 +347,9 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
         "tcd_urls": tcd_urls,
         "cited_domains": cited_domains,
         "cited_urls": cited_urls,
+        "citation_status": cite_status,
         "answer_text_hash": answer_text_hash,
-        "error_message": record.get("error_message"),
+        "error_message": record.get("error_message") or content_error,
     }
 
 

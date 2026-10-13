@@ -150,3 +150,54 @@ def test_build_aio_observation_failed_has_null_fields():
     assert obs["aio_generated"] is None
     assert obs["tcd_cited"] is None
     assert obs["error_message"] == "timeout"
+
+
+def _aio_record(ai_overview, ai_overview_result=None):
+    return {
+        "observed_at": "2026-10-13T00:02:11Z", "query": "ブランディング 会社 東京", "acquisition_status": "success",
+        "raw_response": {"search_result": {"ai_overview": ai_overview}, "ai_overview_result": ai_overview_result},
+        "error_message": None,
+    }
+
+
+def test_build_aio_observation_page_token_only_is_citation_unavailable():
+    # SerpAPIが本文の代わりにpage_tokenだけを返した場合、「引用元なし」「TCD引用なし」とは判定しない
+    obs = normalize.build_aio_observation(_aio_record({"page_token": "tok", "serpapi_link": "https://serpapi.com/x"}))
+    assert obs["aio_generated"] is True
+    assert obs["citation_status"] == "unavailable"
+    assert obs["tcd_cited"] is None
+    assert obs["cited_domains"] == []
+
+
+def test_build_aio_observation_uses_followup_result_when_search_result_has_token_only():
+    followup = {"ai_overview": {"text_blocks": [{"snippet": "x"}], "references": [{"link": "https://tcd.jp/"}]}}
+    obs = normalize.build_aio_observation(_aio_record({"page_token": "tok"}, followup))
+    assert obs["citation_status"] == "extracted"
+    assert obs["tcd_cited"] is True
+
+
+def test_build_aio_observation_text_without_references_is_citation_none():
+    obs = normalize.build_aio_observation(_aio_record({"text_blocks": [{"snippet": "x"}], "references": []}))
+    assert obs["citation_status"] == "none"
+    assert obs["tcd_cited"] is False
+
+
+def test_competitor_domains_excludes_google_internal_links_and_duplicates():
+    record = _aio_record({"references": [
+        {"link": "https://www.paddledesign.co.jp/a", "source": "パドル"},
+        {"link": "https://www.google.com/searchviewer/10?svid=x", "source": "Google"},
+        {"link": "https://www.google.com/searchviewer/10?svid=y", "source": "Google"},
+        {"link": "https://www.paddledesign.co.jp/b", "source": "パドル"},
+        {"link": "https://tcd.jp/", "source": "TCD"},
+    ]})
+    obs = normalize.build_aio_observation(record)
+    # 元データ（cited_domains）は保持し、集計・表示用だけ除外する
+    assert obs["cited_domains"].count("Google") == 2
+    assert normalize.competitor_domains(obs) == ["paddledesign.co.jp"]
+
+
+def test_citation_status_falls_back_for_observations_saved_before_the_field_existed():
+    legacy = {"acquisition_status": "success", "aio_generated": True, "cited_domains": [], "cited_urls": []}
+    assert normalize.citation_status(legacy) == "unavailable"
+    assert normalize.citation_status({**legacy, "cited_domains": ["a.com"]}) == "extracted"
+    assert normalize.citation_status({"acquisition_status": "not_generated", "aio_generated": False}) is None

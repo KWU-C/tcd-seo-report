@@ -64,7 +64,8 @@ def get_weekly_period(today: datetime | None = None, pipeline_cfg: dict | None =
 def run(credentials_file: str = "credentials.json", output_root: Path | str = PROCESSED_DIR) -> Path:
     pages = config_loader.load_pages()
     queries_cfg = config_loader.load_queries()
-    priority_queries = [m["query"] for m in queries_cfg["markets"].values()]
+    # aio: false の市場（参考クエリ）はAIO観測対象外（2026-09-30。SerpAPI件数は4件のまま）
+    priority_queries = [m["query"] for m in queries_cfg["markets"].values() if m.get("aio", True)]
     pipeline_cfg = config_loader.load_pipeline_config()
 
     period = get_weekly_period(pipeline_cfg=pipeline_cfg)

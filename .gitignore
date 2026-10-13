@@ -41,3 +41,6 @@ env/
 .vscode/
 .idea/
 .codex/
+
+# 新形式確認用のプレビュー出力（配信対象の reports_v2/ とは別。生成物のためコミット対象外）
+preview_v2/

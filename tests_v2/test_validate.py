@@ -86,3 +86,19 @@ def test_run_validation_raises_on_fail(tmp_path):
             manifest_path=tmp_path / "manifest.json",
         )
     assert exc_info.value.report["status"] == "fail"
+
+
+def test_validate_aio_warns_when_success_record_has_no_content():
+    # SerpAPIがpage_tokenのみ返し、追加取得でも本文が得られなかった場合はpassのままにしない
+    records = [
+        {"query": "q1", "acquisition_status": "success",
+         "raw_response": {"search_result": {"ai_overview": {"page_token": "tok"}},
+                          "ai_overview_result": {"error": "Google hasn't returned any results for this query."}}},
+        {"query": "q2", "acquisition_status": "success",
+         "raw_response": {"search_result": {"ai_overview": {"page_token": "tok"}},
+                          "ai_overview_result": {"ai_overview": {"references": [{"link": "https://example.com/"}]}}}},
+    ]
+    errors, warnings, meta = validate.validate_aio(records, ["q1", "q2"])
+    assert errors == []
+    assert meta["aio_content_unavailable"] == ["q1"]
+    assert len(warnings) == 1 and "q1" in warnings[0] and "判定不可" in warnings[0]

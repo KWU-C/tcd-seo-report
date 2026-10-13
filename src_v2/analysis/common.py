@@ -13,7 +13,19 @@ EXPECTED_CTR_BY_POSITION: dict[int, float] = {
 }
 
 VALID_SEVERITIES = {"critical", "warning", "info"}
-VALID_JUDGMENTS = {"実施", "継続観測", "効果確認待ち", "再調査", "判断保留"}
+VALID_JUDGMENTS = {"実施", "継続観測", "効果確認待ち", "再調査", "判断保留", "表示なし", "参考"}
+
+# 「判断保留」「再調査」「表示なし」で、判断のために何が不足しているか（レポートに「判断｜不足：X」で表示）
+SHORTFALL_SAMPLE = "サンプル数"
+SHORTFALL_COMPETITOR_SERP = "競合SERP確認"
+SHORTFALL_INDEX = "インデックス確認"
+SHORTFALL_IMPLEMENTED_AT = "実装日"
+SHORTFALL_TARGET_PAGES = "対象ページ"
+
+# 「不足」ではなく次に調べるべきこと（レポートに「判断｜要調査：X」で表示）。
+# 市場でImp=0の場合に使う。インデックス未確認（SHORTFALL_INDEX）は、個別ページで
+# GSCデータが存在しない等、実際にインデックス状況の確認が必要なケースに限定する。
+INVESTIGATE_SERP = "SERP確認"
 
 
 def make_finding(
@@ -27,6 +39,8 @@ def make_finding(
     judgment: str | None = None,
     evidence: dict | None = None,
     source: dict | None = None,
+    shortfall: str | None = None,
+    investigate: str | None = None,
 ) -> dict:
     """Finding単位の必須フィールド（id/category/severity/confidence/message/recommendation）を
     保証しつつ生成する。judgment/evidence/sourceは追跡可能性のための追加フィールド。
@@ -50,6 +64,10 @@ def make_finding(
         finding["evidence"] = evidence
     if source is not None:
         finding["source"] = source
+    if shortfall is not None:
+        finding["shortfall"] = shortfall
+    if investigate is not None:
+        finding["investigate"] = investigate
     return finding
 
 

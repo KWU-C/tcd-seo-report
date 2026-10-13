@@ -69,6 +69,25 @@ def _count_weeks_available(processed_root: Path, up_to_cur_end: str) -> int:
     return max(count, 1)
 
 
+def _annotate_persistence(findings: list[dict], processed_root: Path, period: dict) -> None:
+    """前週analysis.jsonと突き合わせ、同じFinding（id・judgment・severityが一致）が
+    何週連続しているかを finding["persistence"] に付与する。
+    「今週やること」の「2週以上継続」判定に使う。前週のanalysis.jsonが無い場合は
+    継続性を判定できないため previous_available=False とし、連続週数は1とする（安全側）。
+    """
+    prv_path = processed_root / f"{period['prv_start']}_{period['prv_end']}" / "analysis.json"
+    previous = {}
+    if prv_path.exists():
+        previous = {f["id"]: f for f in json.loads(prv_path.read_text(encoding="utf-8"))["findings"]}
+
+    for f in findings:
+        prev = previous.get(f["id"])
+        weeks = 1
+        if prev and prev.get("judgment") == f.get("judgment") and prev.get("severity") == f.get("severity"):
+            weeks = (prev.get("persistence") or {}).get("consecutive_weeks", 1) + 1
+        f["persistence"] = {"consecutive_weeks": weeks, "previous_available": prv_path.exists()}
+
+
 def _data_summary(bundle: dict, excluded_cfg: dict | None) -> dict:
     """記述的メタデータのみ（取得件数・比較週有無・除外リスト）。判定ロジックは含まない。
     Phase 5のレポート層がanalysis.json以外（normalized.json・config_v2/等）を
@@ -125,6 +144,8 @@ def run_analysis(
         findings += analyze_initiatives(initiatives_md_path, bundle, pages_cfg, thresholds_cfg, weeks_available)
     else:
         print(f"警告: {initiatives_md_path} が見つからないため施策評価をスキップします", file=sys.stderr)
+
+    _annotate_persistence(findings, processed_root, period)
 
     analysis = {
         "schema_version": SCHEMA_VERSION,

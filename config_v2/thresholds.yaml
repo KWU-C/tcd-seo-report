@@ -11,6 +11,14 @@ low_data:
   position_change_meaningful: 2.0   # 順位変動がこの値未満は「実質変化なし」として扱う
   minimum_weeks_for_trend: 3        # 「傾向」と呼ぶために必要な最低週数（4週推移等の判定に使用）
 
+# 市場評価（2026-09-30）。個別ページ用の low_impressions(50) を市場に一律適用しない。
+# 市場ごとの最低Imp = min(low_impressions, search_volume_ref ÷ weeks_per_month × min_impressions_ratio)
+# （例: 東京Vol.1,000→50、大阪Vol.300→35）。これ以上のImpがある場合のみ順位の上昇・下降を判定する。
+# 実務的な暫定閾値。運用データを見て調整する。
+market:
+  weeks_per_month: 4.3
+  min_impressions_ratio: 0.5
+
 # Confidence判定（High / Medium / Low / Not assessable）の判断材料
 # 具体的な閾値との対応づけ（例: データ量がlow_impressions未満ならHighにしない等）は
 # 分析ロジック実装時に確定する。ここでは判断材料の一覧のみ固定する。
@@ -43,3 +51,5 @@ magazine_landing_pages:
 display:
   position_delta_flat: 1.0    # これ未満の変化幅は「横ばい」表示（矢印なし）
   position_delta_minor: 3.0   # これ未満は「軽微な変化」、これ以上は「改善／悪化」表示
+  access_change_pct: 5.0      # ②今週の要点: 到達ユーザー数の前週比がこの%以上で「増加／減少」と書く
+
