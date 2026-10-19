@@ -132,7 +132,7 @@ def _seo_table_html(pm: dict) -> str:
 
 def _seo_row_html(row: dict) -> str:
     shown = row["position"] is not None and row["impressions"]
-    pos_html = f"{row['position']:.1f}" if shown else '— <span class="cell-note">GSCで表示データなし</span>'
+    pos_html = f'<span class="rank-value">{row["position"]:.1f}</span>' if shown else '— <span class="cell-note">GSCで表示データなし</span>'
     # 色は改善・悪化と判定できた場合のみ（参考値・横ばいは無彩色）
     state = {"改善": "good", "悪化": "critical"}.get(row["seo_movement"] if shown else "", "neutral")
     related = f'<span class="cell-note">{escape(RELATED_QUERIES_NOTE)}</span>' if row.get("includes_related_queries") else ""
@@ -515,6 +515,7 @@ _STYLE = """
   table.market-table { margin-bottom: .6rem; }
   table.market-table td.muted { color: var(--text-muted); }
   table.pages-table th.num { text-align: right; }
+  .rank-value { font-weight: 600; font-size: 1.3rem; }
   .cell-note { display: block; font-size: .72rem; font-weight: 400; color: var(--text-muted); }
   td.num .cell-note { display: inline; margin-left: .3rem; }
   ul.table-notes { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .74rem; color: var(--text-muted); line-height: 1.6; }
