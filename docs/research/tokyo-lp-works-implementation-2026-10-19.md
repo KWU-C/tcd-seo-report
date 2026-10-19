@@ -130,7 +130,7 @@
 
 ## 6. 見つかった別件（今回は未対応）
 
-2026-10-19 に canonical の不整合を調査済み。原因はテーマの `tcd_canonical_url()`（functions.php）がアーカイブ系のURLに末尾スラッシュを付けて出力していること。Works以外のアーカイブ（/branding、/service、著者ページ、ページ送り）も同じ。修正は確認後に別途行う。
+2026-10-19 に canonical の不整合を調査済み。原因はテーマの `tcd_canonical_url()`（functions.php）がアーカイブ系のURLに末尾スラッシュを付けて出力していること。Works以外のアーカイブ（/branding、/service、著者ページ、ページ送り）も同じ。修正は確認後に別途行う。→ 修正と検証の記録: [archive-canonical-fix-2026-10-19.md](archive-canonical-fix-2026-10-19.md)（ステージングまで反映、本番未反映）
 
 - **カテゴリページの canonical とURLの食い違い**: /works/corporate の canonical は `https://tcd.jp/works/corporate/`（末尾スラッシュあり）だが、そのURLはスラッシュなしへ301リダイレクトされる。他の事例カテゴリも同じ構造の可能性がある。canonical の出力元（WordPress本体のターム canonical か、テーマか）を調べたうえで別タスクで対応する。
 - /tokyo の og:title は、固定ページではサイト名のまま（header.php の仕様）。

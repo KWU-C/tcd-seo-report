@@ -253,6 +253,15 @@ pages:
     enabled: true
     objective: [regional]
 
+  - id: branding-tokyo
+    title: 東京のブランディング会社｜ブランド戦略の株式会社TCD
+    url: https://tcd.jp/tokyo
+    group: branding
+    category: definition
+    priority: null
+    enabled: true
+    objective: [regional]
+
   - id: branding-osaka-branding-company
     title: 大阪でブランディング会社を選ぶ前に｜比較観点と依頼先選定のチェックリスト
     url: https://tcd.jp/branding/03-news/osaka-branding-company.html
