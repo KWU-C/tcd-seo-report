@@ -1,6 +1,6 @@
 # 一覧系ページの canonical・URL整合性の修正記録（2026-10-19）
 
-- テーマ: `~/Documents/tcd-2026-theme`、ブランチ `fix/archive-canonical-url`（origin に push 済み。**main へのマージ・本番デプロイは未実施**）
+- テーマ: `~/Documents/tcd-2026-theme`、ブランチ `fix/archive-canonical-url`。**2026-10-19 に PR #20 で main にマージし、本番反映済み**（同日、/works/corporate の導入文の削除 PR #21 もあわせて反映）
 - コミット: e324a93（canonical・og:url・404・著者ページの301）、8d1ac01（内部リンク）
 - ステージング反映: https://sg2026.tcd.jp/ （2026-10-19 14:40 JST）
 - ステージングの反映前のファイル: `/home/users/2/tcdadmin/theme_backup_sg2026_20261019_144046_archive-canonical-url/`（公開ディレクトリ外、21ファイル）
@@ -160,3 +160,17 @@ Search Console では、/about/（スラッシュあり）だけが表示され�
 5. 4章の /about の確認を、反映後2〜4週で行う
 
 戻す場合: main で2つのコミットを revert して再デプロイする。ステージングは上記のバックアップから戻せる。
+
+## 7. 本番反映（2026-10-19）
+
+- PR #20（canonical・内部リンク、e324a93・8d1ac01）と PR #21（/works/corporate 上部の導入文と .archive-lead の削除、c4b1eff）を main にマージし、Deploy to Production を実行（ユーザー）。main は 5ad38af
+- 本番で確認:
+  - 47URLで、canonical・og:url・リダイレクトの結果がステージングの検証結果と完全に一致。一覧系の canonical はスラッシュなしで200、404 は canonical なし、旧著者URLは301が1回
+  - 本番のテーマファイル（base.css を含む）は main と一致。47ページでPHPエラーなし
+  - /works/corporate の導入文と .archive-lead のCSSがなくなった。ほかの Works カテゴリ（/works、product、service、promotion、naming と2ページ目以降）にも導入文はない
+- 管理画面で本文の古いリンク3件を修正（ユーザー承認済み。各投稿の本文で、変わったのは該当の1行だけ。変更前の本文は作業環境に保存）:
+  - 企業ブランディング支援（投稿 16973）: `/contact/` → `/contact`
+  - キャリア採用（固定ページ 16997）: `/career_entry/` → `/career_entry`
+  - 新卒採用（固定ページ 17184）: `/recruit_entry/` → `/recruit_entry`
+- 修正後、本番19ページの内部リンク164本がすべて301なしで200
+- /recruit/career.html のコメントアウトされた「【芦屋本社】コピーライター」の行（/copy-wrighter-ashiya）はそのまま
