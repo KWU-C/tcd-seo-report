@@ -331,6 +331,21 @@ def test_aio_sources_show_top_three_in_body_and_all_in_appendix():
     assert "d.com" in render_markdown(vm) and "d.com" in render_html(vm)
 
 
+def test_aio_sources_with_only_unknown_domains_are_not_reported_as_no_sources():
+    vm = _vm([_keyword_finding("market-tokyo", "tokyo", 9.0, 9.0, 126,
+                               citations={"status": "extracted", "domains": [], "unknown_count": 2})])
+    assert _row(vm, "東京")["aio_sources_label"] == "引用元不明（2件）"
+    md, html = render_markdown(vm), render_html(vm)
+    assert "ドメイン不明 2件" in md and "ドメイン不明 2件" in html
+    assert "引用元なし" not in md
+
+
+def test_aio_sources_label_is_unchanged_when_no_unknown_sources():
+    vm = _vm([_keyword_finding("market-tokyo", "tokyo", 9.0, 9.0, 126, citations={"status": "extracted", "domains": ["a.com"]})])
+    assert _row(vm, "東京")["aio_sources_label"] == "a.com"
+    assert "ドメイン不明" not in render_markdown(vm)
+
+
 def test_highlights_are_capped_at_three_and_start_with_access():
     analysis = _analysis([_keyword_finding("market-tokyo", "tokyo", 9.0, 10.3, 126, tcd_cited=True,
                                            citations={"status": "extracted", "domains": ["a.com"]})])

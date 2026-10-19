@@ -29,9 +29,47 @@ serpapi:
   location: "Japan"
 
 # ──────────────────────────────────────────
-# TCD判定用ドメイン（このドメインを含むかどうかで tcd_cited / tcd_mentioned を判定）
+# TCD判定用ドメイン（引用URLのホスト名がこのドメイン、またはそのサブドメインなら tcd_cited）
 # ──────────────────────────────────────────
 tcd_domain: "tcd.jp"
+
+# ──────────────────────────────────────────
+# TCD社名判定（AIO本文での言及・推薦）
+# 「株式会社TCD」「（株）TCD」「TCD Corporation」「tcd.jp」は単独で判定する。
+# 「TCD」単独の表記は、同じ行に context_terms のいずれかがあり、
+# exclude_terms（WordPressテーマ「TCD」＝株式会社デザインプラス 等）がない場合のみ判定する。
+# ──────────────────────────────────────────
+tcd_entity:
+  context_terms: ["ブランディング", "ブランド", "銀座", "芦屋", "50年", "1971"]
+  exclude_terms: ["WordPress", "ワードプレス", "テーマ", "デザインプラス", "Design Plus", "DesignPlus", "tcd-theme"]
+
+# ──────────────────────────────────────────
+# TCD推薦判定
+# query_keywords を含むクエリだけを推薦判定の対象とする（それ以外は not_applicable）。
+# 本文から会社名（法人格つきの表記、または known_company_names）を1社以上検出できた場合のみ
+# 「会社一覧を取得できた」とみなし、TCDが登場しなければ not_recommended とする。
+# 会社名を1社も検出できない場合は undeterminable（推薦判定不可）。
+# ──────────────────────────────────────────
+recommendation:
+  query_keywords: ["会社"]
+  known_company_names:
+    - "パラドックス"
+    - "セブンデックス"
+    - "エイトブランディングデザイン"
+    - "EIGHT BRANDING DESIGN"
+    - "グラムコ"
+    - "GRAMCO"
+    - "ID INC."
+    - "パドルデザインカンパニー"
+    - "イマジナ"
+    - "MIMIGURI"
+    - "Takram"
+    - "グッドパッチ"
+    - "Goodpatch"
+    - "揚羽"
+    - "リンクアンドモチベーション"
+    - "スピッカート"
+    - "Move Emotions"
 
 # ──────────────────────────────────────────
 # AIO引用元ドメイン正規化
@@ -46,3 +84,32 @@ domain_aliases:
     - "パドルデザインカンパニー"
     - "株式会社パドルデザインカンパニー"
     - "Paddle Design"
+  # 以下は data_v2/raw/aio の生レスポンスで「表示名 → リンク先ホスト」の対応を確認したもの（2026-10-19）。
+  # リンクが google.co.jp/goto 等で遷移先が分からない引用元も、表示名からドメインへ寄せるために使う。
+  tcd.jp: ["株式会社TCD"]
+  prdx.co.jp: ["株式会社パラドックス"]
+  sevendex.com: ["株式会社セブンデックス"]
+  8brandingdesign.com: ["EIGHT BRANDING DESIGN"]
+  goodpatch.com: ["Goodpatch"]
+  okanechips.mei-kyu.com: ["おかねチップス"]
+  web-kanji.com: ["Web幹事"]
+  shopowner-support.net: ["キャククル"]
+  spicato.com: ["株式会社スピッカート"]
+  studiokeya.com: ["株式会社桶屋"]
+  honehone-rock.com: ["Bone株式会社"]
+  piic.co.jp: ["株式会社Piic"]
+  irischitose.co.jp: ["アイリスチトセ株式会社"]
+  kokuyo-marketing.co.jp: ["コクヨマーケティング株式会社"]
+  okamura.co.jp: ["株式会社オカムラ"]
+  link-ss.co.jp: ["株式会社リンクソシュール"]
+  hatarakigai.info: ["Great Place To Work® Institute Japan"]
+  hakuhodo-consulting.co.jp: ["Hakuhodo Consulting"]
+  mba.globis.ac.jp: ["グロービス経営大学院"]
+  dhw.ac.jp: ["デジタルハリウッド大学"]
+  biz.moneyforward.com: ["マネーフォワード クラウド"]
+  satori.marketing: ["マーケティングオートメーションツール SATORI"]
+  smbc.co.jp: ["三井住友銀行"]
+  mirasapo-plus.go.jp: ["中小企業庁 ミラサポplus"]
+  canva.com: ["Canva"]
+  youtube.com: ["YouTube"]
+  ja.wikipedia.org: ["Wikipedia"]

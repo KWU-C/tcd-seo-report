@@ -32,8 +32,16 @@ queries:
 ```
 
 同ファイルの `domain_aliases` で、引用元表記のゆれ（社名／英語表記など）を
-正規化後のドメインに寄せられる。`tcd_domain`（デフォルト `tcd.jp`）を含むかどうかで
-TCD引用・言及を判定する。
+正規化後のドメインに寄せられる。TCD引用は引用URLのホスト名が `tcd_domain`（デフォルト `tcd.jp`）か、
+引用元表記が「株式会社TCD」等かで判定する。本文でのTCDの言及・推薦は `tcd_entity`
+（WordPressテーマ「TCD」との混同を避ける条件）と `recommendation`（推薦判定の対象クエリ・会社名）で判定する。
+
+AIO生成・TCD引用・TCD推薦はそれぞれ独立に判定し、本文・引用元や会社一覧を取得できない場合は
+「なし」ではなく判定不可（空欄）として記録する。判定不可の件数・割合は次で確認できる。
+
+```bash
+python3 aio_daily_quality.py [--since YYYY-MM-DD] [--until YYYY-MM-DD]
+```
 
 ## 3. 手動実行
 
@@ -65,7 +73,9 @@ data/aio/
     2026-07-06.json        ← その日の生データ（AIO全文・引用URL/ドメイン/タイトル含む）
   looker/
     aio_daily.csv           ← クエリ粒度（date, query, aio_exists, tcd_cited, tcd_mentioned,
-                                aio_text_hash, aio_text_changed, status）
+                                aio_text_hash, aio_text_changed, observation_type, previous_hash_exists, status,
+                                citation_status, tcd_recommended, recommendation_status, recommendation_reason）
+                                tcd_cited / tcd_recommended の空欄は判定不可
     aio_domains_daily.csv   ← 引用ドメイン粒度、1行1ドメイン（date, query, cited_domain,
                                 cited_domain_count）
 ```

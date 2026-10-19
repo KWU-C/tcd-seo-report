@@ -196,6 +196,50 @@ def test_competitor_domains_excludes_google_internal_links_and_duplicates():
     assert normalize.competitor_domains(obs) == ["paddledesign.co.jp"]
 
 
+def test_google_goto_links_use_source_domain_instead_of_google():
+    # google.co.jp/goto は遷移先がURLから分からない。google.co.jp と記録せず、source欄のドメインを使う
+    record = _aio_record({"references": [
+        {"link": "https://www.google.co.jp/goto?url=CAESabc", "source": "okanechips.mei-kyu.com"},
+        {"link": "https://www.google.co.jp/goto?url=CAESdef", "source": "www.ziaspromotion.co.jp"},
+        {"link": "https://prdx.co.jp/tokyo/", "source": "株式会社パラドックス"},
+    ]})
+    obs = normalize.build_aio_observation(record)
+    assert obs["cited_domains"] == ["okanechips.mei-kyu.com", "ziaspromotion.co.jp", "prdx.co.jp"]
+    assert obs["cited_urls"] == ["https://prdx.co.jp/tokyo/"]
+    assert obs["unknown_sources"] == []
+    assert normalize.competitor_domains(obs) == ["okanechips.mei-kyu.com", "ziaspromotion.co.jp", "prdx.co.jp"]
+
+
+def test_google_goto_link_with_display_name_uses_verified_alias_or_is_unknown():
+    cfg = {"aliases": {"sevendex.com": ["株式会社セブンデックス"]}}
+    record = _aio_record({"references": [
+        {"link": "https://www.google.co.jp/goto?url=CAESabc", "source": "株式会社セブンデックス"},
+        {"link": "https://www.google.co.jp/goto?url=CAESdef", "source": "未登録の会社"},
+    ]})
+    obs = normalize.build_aio_observation(record, cfg)
+    assert obs["cited_domains"] == ["sevendex.com"]
+    # 別名未登録の表示名はドメインを推測せず「不明」として残す
+    assert obs["unknown_sources"] == ["未登録の会社"]
+    assert obs["citation_status"] == "extracted"
+
+
+def test_all_sources_unknown_is_still_extracted_not_none():
+    record = _aio_record({"text_blocks": [{"snippet": "x"}], "references": [
+        {"link": "https://www.google.co.jp/goto?url=CAESabc", "source": "未登録の会社"},
+    ]})
+    obs = normalize.build_aio_observation(record)
+    assert obs["citation_status"] == "extracted"
+    assert obs["cited_domains"] == [] and obs["unknown_sources"] == ["未登録の会社"]
+    assert obs["tcd_cited"] is False
+
+
+def test_tcd_cited_through_google_goto_link_is_detected_without_a_url():
+    record = _aio_record({"references": [{"link": "https://www.google.co.jp/goto?url=CAES", "source": "株式会社TCD"}]})
+    obs = normalize.build_aio_observation(record)
+    assert obs["tcd_cited"] is True
+    assert obs["tcd_urls"] == []  # 遷移先の分からないGoogle経由URLはTCDページURLとして扱わない
+
+
 def test_citation_status_falls_back_for_observations_saved_before_the_field_existed():
     legacy = {"acquisition_status": "success", "aio_generated": True, "cited_domains": [], "cited_urls": []}
     assert normalize.citation_status(legacy) == "unavailable"

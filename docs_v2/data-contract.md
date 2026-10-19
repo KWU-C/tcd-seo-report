@@ -141,7 +141,8 @@ columns:
   - tcd_cited: bool | null           # aio_generated=true の場合のみ判定。false/nullではnull
   - tcd_urls: [string]
   - cited_domains: [string]
-  - cited_urls: [string]
+  - cited_urls: [string]             # Google経由のリンク（google.com/searchviewer、google.co.jp/goto等）は遷移先が分からないため含めない
+  - unknown_sources: [string]        # 引用元ドメインを特定できなかった引用のsource表記（Google経由リンクで、sourceがドメインでも登録済み別名でもない場合）。推測でドメインに寄せない
   - answer_text_hash: string | null  # 同条件の成功観測間でのみ比較に使う
   - error_message: string | null
 ```

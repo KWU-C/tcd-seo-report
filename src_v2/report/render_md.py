@@ -115,7 +115,9 @@ def _market_card(f: dict) -> str:
     if aio_view.get("citation_unavailable"):
         lines.append("- AIO引用元（全件）: 取得不可（AIO本文・引用元を取得できず）")
     elif aio_view.get("aio_generated_label") == "あり":
-        lines.append(f"- AIO引用元（全件・TCD以外）: {', '.join(domains) if domains else '引用元なし'}")
+        unknown_count = aio_view.get("aio_unknown_source_count") or 0
+        listed = domains + ([f"ドメイン不明 {unknown_count}件"] if unknown_count else [])
+        lines.append(f"- AIO引用元（全件・TCD以外）: {', '.join(listed) if listed else '引用元なし'}")
     for cf in f.get("competitor_findings", []):
         lines.append(f"- 競合動向: {cf['display_message'] or '-'}")
     lines.append(f"- 判定: {f['display_message'] or '-'}")

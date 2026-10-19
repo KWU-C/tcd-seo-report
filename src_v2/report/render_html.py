@@ -198,7 +198,11 @@ def _market_card_html(f: dict) -> str:
     elif aio_view.get("aio_generated_label") != "あり":
         domain_chips = f'<span class="chip chip-muted">AIO生成: {escape(aio_view.get("aio_generated_label") or "未取得")}</span>'
     else:
-        domain_chips = "".join(f'<span class="chip">{escape(d)}</span>' for d in cited_domains) or '<span class="chip chip-muted">引用元なし</span>'
+        unknown_count = aio_view.get("aio_unknown_source_count") or 0
+        domain_chips = "".join(f'<span class="chip">{escape(d)}</span>' for d in cited_domains)
+        if unknown_count:
+            domain_chips += f'<span class="chip chip-muted">ドメイン不明 {unknown_count}件</span>'
+        domain_chips = domain_chips or '<span class="chip chip-muted">引用元なし</span>'
 
     if variants:
         variant_items = "".join(

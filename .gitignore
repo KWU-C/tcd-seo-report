@@ -44,3 +44,6 @@ env/
 
 # 新形式確認用のプレビュー出力（配信対象の reports_v2/ とは別。生成物のためコミット対象外）
 preview_v2/
+
+# AIO日次データ再解析（aio_daily_reanalyze.py）前の元データのバックアップ（ローカル保持のみ）
+data/aio/backup/

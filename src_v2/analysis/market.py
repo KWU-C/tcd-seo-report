@@ -234,7 +234,8 @@ def analyze_market(
             "top_url": top_url,
             "aio": aio_obs,
             # 表示・集計用の引用元（引用順・重複除去・Google内部リンク除外）。元データは aio.cited_domains に保持
-            "aio_citations": {"status": cite_status, "domains": normalize.competitor_domains(aio_obs)},
+            "aio_citations": {"status": cite_status, "domains": normalize.competitor_domains(aio_obs),
+                              "unknown_count": len((aio_obs or {}).get("unknown_sources") or [])},
             "competitor_summary": competitor_summary,
         }
 

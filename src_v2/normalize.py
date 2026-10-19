@@ -233,6 +233,34 @@ def _resolve_domain(raw_domain_or_name: str, alias_lookup: dict[str, str]) -> st
     return alias_lookup.get(key, raw_domain_or_name)
 
 
+_GOOGLE_HOST_RE = re.compile(r"^(?:[a-z0-9-]+\.)*google\.[a-z.]+$")
+_DOMAIN_LIKE_RE = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$", re.IGNORECASE)
+
+
+def _is_google_link(url: str) -> bool:
+    """Google経由のリンク（google.com/searchviewer、google.co.jp/goto 等）か。遷移先はURLから分からない。"""
+    return bool(_GOOGLE_HOST_RE.match(_extract_root_domain(url)))
+
+
+def _source_domain(src_name: str, alias_lookup: dict[str, str]) -> str | None:
+    """引用元URLから遷移先が分からない場合に、SerpAPIの source 欄からドメインを求める。
+
+    source がドメイン表記ならそのドメイン、表示名が alias に登録済みならその正規ドメイン、
+    source が「Google」ならGoogle自身の引用（競合集計からは除外）。それ以外は不明として None を返す
+    （リダイレクト先や表示名からドメインを推測しない）。
+    """
+    name = (src_name or "").strip()
+    if not name:
+        return None
+    if _DOMAIN_LIKE_RE.match(name):
+        host = name.lower()
+        return _resolve_domain(host[4:] if host.startswith("www.") else host, alias_lookup)
+    resolved = _resolve_domain(name, alias_lookup)
+    if resolved != name or name.lower() in _NON_COMPETITOR_SOURCES:
+        return resolved
+    return None
+
+
 # citation_status: AIO生成時に引用元を取得できたかどうか（「引用元なし」と「引用元取得不可」を区別する）
 CITATION_EXTRACTED = "extracted"      # 引用元を1件以上取得
 CITATION_NONE = "none"                # AIO本文は取得できたが引用元は0件
@@ -283,6 +311,7 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
     tcd_urls: list[str] = []
     cited_domains: list[str] = []
     cited_urls: list[str] = []
+    unknown_sources: list[str] = []  # 引用元ドメインを特定できなかった引用（source欄の表記をそのまま保持）
     answer_text_hash: str | None = None
     cite_status: str | None = None
     content_error: str | None = None
@@ -307,16 +336,19 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
                 url, src_name = ref, ""
             else:
                 url = ref.get("link", "") or ref.get("url", "")
-                if url.startswith("https://www.google.com/"):
-                    url = ""
                 src = ref.get("source", {})
                 src_name = src.get("name", "") if isinstance(src, dict) else str(src)
+            # Google経由のリンクは遷移先が分からないため引用URLにせず、ドメインは source 欄から求める
+            if _is_google_link(url):
+                url = ""
 
-            domain = _resolve_domain(_extract_root_domain(url) or src_name, alias_lookup)
+            domain = _resolve_domain(_extract_root_domain(url), alias_lookup) if url else _source_domain(src_name, alias_lookup)
             if url:
                 cited_urls.append(url)
             if domain:
                 cited_domains.append(domain)
+            else:
+                unknown_sources.append(src_name)
 
             haystack = f"{url} {domain} {src_name}".lower()
             if any(p in haystack for p in _TCD_PATTERNS):
@@ -329,7 +361,7 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
             followup = (ai_overview_result or {})
             content_error = followup.get("error") or (followup.get("ai_overview") or {}).get("error")
         else:
-            cite_status = CITATION_EXTRACTED if (cited_domains or cited_urls) else CITATION_NONE
+            cite_status = CITATION_EXTRACTED if (cited_domains or cited_urls or unknown_sources) else CITATION_NONE
 
     elif status == "not_generated":
         aio_generated = False
@@ -347,6 +379,7 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
         "tcd_urls": tcd_urls,
         "cited_domains": cited_domains,
         "cited_urls": cited_urls,
+        "unknown_sources": unknown_sources,
         "citation_status": cite_status,
         "answer_text_hash": answer_text_hash,
         "error_message": record.get("error_message") or content_error,

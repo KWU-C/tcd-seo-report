@@ -200,8 +200,10 @@ def _aio_view(evidence: dict) -> dict:
     if domains is None:  # aio_citations導入前のanalysis.json
         domains = list(dict.fromkeys(d for d in (aio.get("cited_domains") or []) if d and d != "tcd.jp"))
 
+    unknown_count = citations.get("unknown_count") or 0
     view = {"aio_generated_label": "未取得", "tcd_cited_label": "—", "aio_sources_label": "—",
-            "aio_domains": domains, "tcd_cited": None, "citation_unavailable": False}
+            "aio_domains": domains, "aio_unknown_source_count": unknown_count,
+            "tcd_cited": None, "citation_unavailable": False}
     if aio.get("acquisition_status") not in ("success", "not_generated"):
         return view
     if not aio.get("aio_generated"):
@@ -213,8 +215,10 @@ def _aio_view(evidence: dict) -> dict:
 
     tcd_cited = bool(aio.get("tcd_cited"))
     sources = "、".join(domains[:_AIO_TOP_SOURCES]) + (" など" if len(domains) > _AIO_TOP_SOURCES else "")
+    # 引用元はあるがドメインを特定できなかった（Google経由リンク等）場合は「引用元なし」と表示しない
+    empty_label = f"引用元不明（{unknown_count}件）" if unknown_count else "引用元なし"
     return {**view, "aio_generated_label": "あり", "tcd_cited_label": "あり" if tcd_cited else "なし",
-            "aio_sources_label": sources or "引用元なし", "tcd_cited": tcd_cited}
+            "aio_sources_label": sources or empty_label, "tcd_cited": tcd_cited}
 
 
 def _build_priority_markets(market_findings: list[dict], competitor_by_query: dict[str, list[dict]], thresholds_cfg: dict) -> dict:

@@ -147,6 +147,34 @@ competitor_domains:
     irischitose.co.jp:
       - "irischitose.co.jp"
       - "アイリスチトセ株式会社"
+    # 以下は data_v2/raw/aio の生レスポンスで「source表示名 → リンク先ホスト」の対応を確認したもの（2026-10-19）。
+    # 引用リンクが google.co.jp/goto 等で遷移先が分からない場合に、source表示名からドメインを求めるために使う。
+    # 未登録の表示名は「ドメイン不明」として扱う（推測で寄せない）。
+    tcd.jp: ["株式会社TCD"]
+    sevendex.com: ["株式会社セブンデックス"]
+    8brandingdesign.com: ["EIGHT BRANDING DESIGN"]
+    goodpatch.com: ["Goodpatch"]
+    okanechips.mei-kyu.com: ["おかねチップス"]
+    web-kanji.com: ["Web幹事"]
+    shopowner-support.net: ["キャククル"]
+    spicato.com: ["株式会社スピッカート"]
+    studiokeya.com: ["株式会社桶屋"]
+    honehone-rock.com: ["Bone株式会社"]
+    piic.co.jp: ["株式会社Piic"]
+    kokuyo-marketing.co.jp: ["コクヨマーケティング株式会社"]
+    okamura.co.jp: ["株式会社オカムラ"]
+    link-ss.co.jp: ["株式会社リンクソシュール"]
+    hatarakigai.info: ["Great Place To Work® Institute Japan"]
+    hakuhodo-consulting.co.jp: ["Hakuhodo Consulting"]
+    mba.globis.ac.jp: ["グロービス経営大学院"]
+    dhw.ac.jp: ["デジタルハリウッド大学"]
+    biz.moneyforward.com: ["マネーフォワード クラウド"]
+    satori.marketing: ["マーケティングオートメーションツール SATORI"]
+    smbc.co.jp: ["三井住友銀行"]
+    mirasapo-plus.go.jp: ["中小企業庁 ミラサポplus"]
+    canva.com: ["Canva"]
+    youtube.com: ["YouTube"]
+    ja.wikipedia.org: ["Wikipedia"]
   entity_types:
     tcd.jp: branding_company
     paddledesign.co.jp: branding_company
