@@ -32,7 +32,7 @@ def test_build_reports_writes_all_formats_with_current_sections(tmp_path):
     assert set(paths) == {"json", "md", "html"}
     for fmt in ("md", "html"):
         out = paths[fmt].read_text(encoding="utf-8")
-        for heading in ("① サイト全体のアクセス状況", "② 今週の要点", "③ SEO検索順位", "④ AIO引用状況"):
+        for heading in ("① サイト全体のアクセス状況", "② 問い合わせ実績", "③ 今週の要点", "④ SEO検索順位", "⑤ AIO引用状況"):
             assert heading in out
 
 
@@ -47,4 +47,4 @@ def test_build_reports_with_narrative_file_overrides_summary(tmp_path):
 
     assert "今週は大きな変化はなく、データ蓄積を継続する段階です。" in md
     assert "今週は大きな変化はなく、データ蓄積を継続する段階です。" in html
-    assert "② 今週の要点" in md
+    assert "③ 今週の要点" in md

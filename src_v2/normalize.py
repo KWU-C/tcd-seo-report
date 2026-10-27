@@ -298,7 +298,40 @@ def competitor_domains(obs: dict | None) -> list[str]:
     ))
 
 
-def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = None) -> dict:
+# TCD推薦の判定（AIO本文の会社一覧にTCDが紹介されているか）は、日次AIO監視と同じ判定関数・設定を使う
+# （日次と週次で判定基準がずれないようにするため。判定条件の正本は aio_daily_monitor.py と config/aio_queries.yml）。
+AIO_RECOMMENDATION_CONFIG = "config/aio_queries.yml"
+_recommendation_rules: dict | None = None
+
+
+def _load_recommendation_rules() -> dict:
+    global _recommendation_rules
+    if _recommendation_rules is None:
+        import aio_daily_monitor
+        _recommendation_rules = aio_daily_monitor.build_judgement_rules(
+            aio_daily_monitor.load_config(AIO_RECOMMENDATION_CONFIG))
+    return _recommendation_rules
+
+
+def assess_recommendation(query: str, ai_overview: dict | None, cited_urls: list[str], cited_domains: list[str],
+                          rules: dict | None = None) -> dict:
+    """AIO本文からTCD推薦を判定する。tcd_recommended は True（あり）/ False（なし）/ None（判定不可・対象外）。
+    「なし」は会社一覧を最後まで取得でき、その中にTCDがない場合だけ。本文を取得できない・一覧が途中で
+    切れている場合は判定不可（None）とし、「なし」と混同しない。"""
+    import aio_daily_monitor
+    rules = rules or _load_recommendation_rules()
+    text = aio_daily_monitor.extract_aio_text(ai_overview) if ai_overview else ""
+    result = aio_daily_monitor.evaluate_observation(
+        query, "OK_WITH_AIO", True, text, cited_urls, cited_domains, [], rules)
+    return {
+        "tcd_recommended": result["tcd_recommended"],
+        "recommendation_status": result["recommendation_status"],
+        "recommendation_reason": result["recommendation_reason"],
+    }
+
+
+def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = None,
+                          recommendation_rules: dict | None = None) -> dict:
     """AIO raw record（fetch_aio.pyの出力）を data-contract.md 4.2 の
     aio_observation スキーマへ変換する。ドメイン抽出・alias正規化・TCD引用判定は
     ここで初めて行う（rawには含めない）。
@@ -362,13 +395,20 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
             content_error = followup.get("error") or (followup.get("ai_overview") or {}).get("error")
         else:
             cite_status = CITATION_EXTRACTED if (cited_domains or cited_urls or unknown_sources) else CITATION_NONE
+        recommendation = assess_recommendation(
+            record["query"], ai_overview, cited_urls, cited_domains, recommendation_rules)
 
     elif status == "not_generated":
         aio_generated = False
         tcd_cited = None
+        recommendation = {"tcd_recommended": None, "recommendation_status": "no_aio", "recommendation_reason": None}
     else:
         aio_generated = None
         tcd_cited = None
+        # 取得エラー・未実行。推薦を判定するクエリなら「判定不可」（「なし」とは扱わない）
+        recommendation = assess_recommendation(record["query"], None, [], [], recommendation_rules)
+        if recommendation["recommendation_status"] == "undeterminable":
+            recommendation["recommendation_reason"] = "acquisition_failed"
 
     return {
         "observed_at": record["observed_at"],
@@ -381,6 +421,7 @@ def build_aio_observation(record: dict, competitor_domains_cfg: dict | None = No
         "cited_urls": cited_urls,
         "unknown_sources": unknown_sources,
         "citation_status": cite_status,
+        **recommendation,
         "answer_text_hash": answer_text_hash,
         "error_message": record.get("error_message") or content_error,
     }
