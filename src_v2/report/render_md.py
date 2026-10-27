@@ -5,7 +5,7 @@ render_html.pyと同じView Model・同じセクション構成・同じ閾値�
 """
 from __future__ import annotations
 
-from src_v2.report.view_model import RELATED_QUERIES_NOTE, judgment_label
+from src_v2.report.view_model import RELATED_QUERIES_NOTE, inquiry_cumulative_label, judgment_label
 
 
 def _arrow(delta: float | None) -> str:
@@ -29,7 +29,7 @@ def _judgment_confidence(f: dict) -> str:
     return f"[{judgment_label(f)} / 確度: {f['confidence']}]"
 
 
-# ── ② 今週の要点 ────────────────────────────────────────────────
+# ── ③ 今週の要点 ────────────────────────────────────────────────
 
 def _highlights_section(es: dict) -> str:
     narrative = es.get("narrative")
@@ -57,7 +57,24 @@ def _site_usage_section(site_usage: dict) -> str:
     return header + "\n".join(rows) + "\n"
 
 
-# ── ③ SEO検索順位 ───────────────────────────────────────────────
+# ── ② 問い合わせ実績 ─────────────────────────────────────────────
+
+def _count_label(value: int | None) -> str:
+    """当週の件数。未入力（None）は0件と区別して「未入力」と表示する。"""
+    return "未入力" if value is None else f"{value:,}"
+
+
+def _inquiries_section(inq: dict) -> str:
+    cum4 = inq["cumulative"][4]
+    header = "| 項目 | 当週 | 直近4週累計 |\n|---|---:|---:|\n"
+    rows = [
+        f"| {row['label']} | {_count_label(row['current'])} | {inquiry_cumulative_label(cum4, row['cumulative_4w'])} |"
+        for row in inq["rows"]
+    ]
+    return header + "\n".join(rows) + "\n\n" + "\n".join(f"- {n}" for n in inq["notes"]) + "\n"
+
+
+# ── ④ SEO検索順位 ───────────────────────────────────────────────
 
 def _keyword_label(row: dict) -> str:
     return row["market_label"] + (f"（{RELATED_QUERIES_NOTE}）" if row.get("includes_related_queries") else "")
@@ -80,15 +97,16 @@ def _seo_table(pm: dict) -> str:
     return header + "\n".join(lines) + "\n\n" + notes + "\n"
 
 
-# ── ④ AIO引用状況 ───────────────────────────────────────────────
+# ── ⑤ AIO引用状況 ───────────────────────────────────────────────
 
 def _aio_table(pm: dict) -> str:
     rows = pm["table"]
     if not rows:
         return "対象キーワードなし\n"
-    header = "| キーワード | AIO生成 | TCD引用 | 主な引用元 |\n|---|---|---|---|\n"
+    header = "| キーワード | AIO生成 | TCD引用 | TCD推薦 | 主な引用元 |\n|---|---|---|---|---|\n"
     lines = [
-        f"| {row['market_label']} | {row['aio_generated_label']} | {row['tcd_cited_label']} | {row['aio_sources_label']} |"
+        f"| {row['market_label']} | {row['aio_generated_label']} | {row['tcd_cited_label']} "
+        f"| {row['tcd_recommended_label']} | {row['aio_sources_label']} |"
         for row in rows
     ]
     return header + "\n".join(lines) + "\n\n" + "\n".join(f"- {n}" for n in pm["aio_notes"]) + "\n"
@@ -257,13 +275,16 @@ def render_markdown(vm: dict) -> str:
     parts.append("## ① サイト全体のアクセス状況\n")
     parts.append(_site_usage_section(vm["site_usage"]))
 
-    parts.append("## ② 今週の要点\n")
+    parts.append("## ② 問い合わせ実績\n")
+    parts.append(_inquiries_section(vm["inquiries"]))
+
+    parts.append("## ③ 今週の要点\n")
     parts.append(_highlights_section(vm["executive_summary"]))
 
-    parts.append("## ③ SEO検索順位\n")
+    parts.append("## ④ SEO検索順位\n")
     parts.append(_seo_table(vm["priority_markets"]))
 
-    parts.append("## ④ AIO引用状況\n")
+    parts.append("## ⑤ AIO引用状況\n")
     parts.append(_aio_table(vm["priority_markets"]))
 
     parts.append(_appendix_section(vm["appendix"], vm["priority_markets"], low_impressions_threshold))

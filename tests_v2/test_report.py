@@ -188,7 +188,7 @@ def test_render_json_md_html_reference_same_data():
     assert "施策メッセージ" in md_out
     assert "施策メッセージ" in html_out
 
-    for label in ("① サイト全体のアクセス状況", "② 今週の要点", "③ SEO検索順位", "④ AIO引用状況",
+    for label in ("① サイト全体のアクセス状況", "② 問い合わせ実績", "③ 今週の要点", "④ SEO検索順位", "⑤ AIO引用状況",
                   "キーワード別詳細", "実装日未登録の施策", "上位ランディングページ"):
         assert label in md_out
         assert label in html_out
@@ -289,11 +289,11 @@ def _row(vm, region_label):
     return next(r for r in vm["priority_markets"]["table"] if r["short_label"] == region_label)
 
 
-def test_sections_are_ordered_access_seo_aio_appendix():
+def test_sections_are_ordered_access_inquiries_seo_aio_appendix():
     vm = _vm([_keyword_finding("market-tokyo", "tokyo", 9.0, 10.3, 126,
                                citations={"status": "extracted", "domains": ["a.com"]})])
     for out in (render_markdown(vm), render_html(vm)):
-        positions = [out.index(h) for h in ("① サイト全体のアクセス状況", "② 今週の要点", "③ SEO検索順位", "④ AIO引用状況", "Appendix　※クリックして表示")]
+        positions = [out.index(h) for h in ("① サイト全体のアクセス状況", "② 問い合わせ実績", "③ 今週の要点", "④ SEO検索順位", "⑤ AIO引用状況", "Appendix　※クリックして表示")]
         assert positions == sorted(positions)
         assert "重点商談市場" not in out and "テーマ市場" not in out
 

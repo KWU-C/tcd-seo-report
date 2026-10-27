@@ -3,8 +3,8 @@
 render_md.pyと同じView Modelを参照し、同じFinding集合を表示する
 （Markdown/HTML間で内容差異が生じないようにするため）。
 
-レポート構成（4セクション + Appendix。2026-10-13改善指示書）:
-① サイト全体のアクセス状況 → ② 今週の要点 → ③ SEO検索順位 → ④ AIO引用状況 → Appendix。
+レポート構成（5セクション + Appendix。2026-10-13改善指示書、2026-10-27に②問い合わせ実績を追加）:
+① サイト全体のアクセス状況 → ② 問い合わせ実績 → ③ 今週の要点 → ④ SEO検索順位 → ⑤ AIO引用状況 → Appendix。
 判断に必要な情報を本文に残し、根拠の全件データはAppendix（<details>）へ移す。
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from html import escape
 
-from src_v2.report.view_model import RELATED_QUERIES_NOTE, judgment_label
+from src_v2.report.view_model import RELATED_QUERIES_NOTE, inquiry_cumulative_label, judgment_label
 
 _SEVERITY_STATUS = {"critical": "critical", "warning": "warning", "info": "neutral"}
 
@@ -48,11 +48,11 @@ def _fmt_num(n) -> str:
     return "-" if n is None else escape(str(n))
 
 
-# ── ② 今週の要点 ────────────────────────────────────────────────
+# ── ③ 今週の要点 ────────────────────────────────────────────────
 
 # AIOでのTCD引用は最重要指標のため、本文中の該当文言を赤字・太字で強調する（2026-09-30ユーザー指示）。
 # メール（Gmail）でも確実に効くよう、CSS変数ではなくインラインstyleで指定する。
-_AIO_CITED_PHRASES = ("TCD AIO引用あり", "AIOでTCD引用あり", "AIO引用あり", "TCD引用あり")
+_AIO_CITED_PHRASES = ("TCD AIO引用あり", "AIOでTCD引用あり", "AIO引用あり", "TCD引用あり", "TCD推薦あり")
 _AIO_CITED_RE = re.compile("|".join(re.escape(p) for p in _AIO_CITED_PHRASES))
 _AIO_CITED_STYLE = "color:#d03b3b;font-weight:700"
 
@@ -111,7 +111,41 @@ def _site_tile_html(seg: dict) -> str:
         </div>"""
 
 
-# ── ③ SEO検索順位（重点4キーワードを1つの表で表示） ──────────────────
+# ── ② 問い合わせ実績（config_v2/inquiries.yaml の確定済み件数） ──────────
+
+def _inquiry_count_html(value: int | None) -> str:
+    """当週の件数。未入力（None）は0件と区別して「未入力」と表示する。"""
+    return '<span class="muted">未入力</span>' if value is None else f"{value:,}"
+
+
+def _inquiry_cumulative_html(cum: dict, value: int | None) -> str:
+    label = escape(inquiry_cumulative_label(cum, value))
+    return label if cum["complete"] else f'<span class="muted">{label}</span>'
+
+
+def _inquiries_html(inq: dict) -> str:
+    cum4 = inq["cumulative"][4]
+    rows = []
+    for row in inq["rows"]:
+        # 案件相談は最終的な営業成果指標のため強調する
+        label = f"<strong>{escape(row['label'])}</strong>" if row["key"] in ("general_total", "project_consultation") else escape(row["label"])
+        rows.append(f"""
+      <tr>
+        <td>{label}</td>
+        <td class="num">{_inquiry_count_html(row['current'])}</td>
+        <td class="num">{_inquiry_cumulative_html(cum4, row['cumulative_4w'])}</td>
+      </tr>""")
+    return f"""
+    <table class="pages-table market-table inquiry-table">
+      <thead>
+        <tr><th>項目</th><th class="num">当週</th><th class="num">直近4週累計</th></tr>
+      </thead>
+      <tbody>{"".join(rows)}</tbody>
+    </table>
+    {_notes_html(inq["notes"])}"""
+
+
+# ── ④ SEO検索順位（重点4キーワードを1つの表で表示） ──────────────────
 
 def _notes_html(notes: list[str]) -> str:
     return '<ul class="table-notes">' + "".join(f"<li>{escape(n)}</li>" for n in notes) + "</ul>"
@@ -147,7 +181,7 @@ def _seo_row_html(row: dict) -> str:
     </tr>"""
 
 
-# ── ④ AIO引用状況（同じ4キーワード。SEO順位とは別の表にする） ──────────
+# ── ⑤ AIO引用状況（同じ4キーワード。SEO順位とは別の表にする） ──────────
 
 def _aio_table_html(pm: dict) -> str:
     if not pm["table"]:
@@ -155,7 +189,7 @@ def _aio_table_html(pm: dict) -> str:
     return f"""
     <table class="pages-table market-table">
       <thead>
-        <tr><th>キーワード</th><th>AIO生成</th><th>TCD引用</th><th>主な引用元</th></tr>
+        <tr><th>キーワード</th><th>AIO生成</th><th>TCD引用</th><th>TCD推薦</th><th>主な引用元</th></tr>
       </thead>
       <tbody>{"".join(_aio_row_html(row) for row in pm["table"])}</tbody>
     </table>
@@ -168,12 +202,20 @@ def _aio_row_html(row: dict) -> str:
         tcd_html = f'<strong style="{_AIO_CITED_STYLE}">{escape(tcd_label)}</strong>'
     else:
         tcd_html = _status_chip(tcd_label, "warning" if tcd_label == "なし" else "neutral")
+    rec_label = row["tcd_recommended_label"]
+    if rec_label == "あり":
+        rec_html = f'<strong style="{_AIO_CITED_STYLE}">{escape(rec_label)}</strong>'
+    elif rec_label in ("なし", "判定不可"):
+        rec_html = _status_chip(rec_label, "warning" if rec_label == "なし" else "neutral")
+    else:
+        rec_html = f'<span class="muted">{escape(rec_label)}</span>'
     sources_class = ' class="muted"' if row["citation_unavailable"] else ""
     return f"""
     <tr>
       <td><strong>{escape(row['market_label'])}</strong></td>
       <td>{escape(row['aio_generated_label'])}</td>
       <td>{tcd_html}</td>
+      <td>{rec_html}</td>
       <td{sources_class}>{escape(row['aio_sources_label'])}</td>
     </tr>"""
 
@@ -513,7 +555,7 @@ _STYLE = """
 
   /* SEO順位・AIO引用の表、Appendixのキーワード別詳細カード */
   table.market-table { margin-bottom: .6rem; }
-  table.market-table td.muted { color: var(--text-muted); }
+  table.market-table td.muted, table.market-table .muted { color: var(--text-muted); }
   table.pages-table th.num { text-align: right; }
   .rank-value { font-weight: 600; font-size: 1.3rem; }
   .cell-note { display: block; font-size: .72rem; font-weight: 400; color: var(--text-muted); }
@@ -582,18 +624,23 @@ def render_html(vm: dict) -> str:
   {_site_usage_html(vm["site_usage"])}
 </section>
 
+<section>
+  <h2>② 問い合わせ実績</h2>
+  {_inquiries_html(vm["inquiries"])}
+</section>
+
 <section class="executive-summary">
-  <h2>② 今週の要点</h2>
+  <h2>③ 今週の要点</h2>
   {_highlights_html(vm["executive_summary"])}
 </section>
 
 <section>
-  <h2>③ SEO検索順位</h2>
+  <h2>④ SEO検索順位</h2>
   {_seo_table_html(vm["priority_markets"])}
 </section>
 
 <section>
-  <h2>④ AIO引用状況</h2>
+  <h2>⑤ AIO引用状況</h2>
   {_aio_table_html(vm["priority_markets"])}
 </section>
 

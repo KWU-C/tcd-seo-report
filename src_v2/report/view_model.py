@@ -6,12 +6,13 @@ Impressions下限）のみ config_v2/thresholds.yaml から読む（新しい分
 確定済みの値をそのまま使い、ここでは「どれを本文に出すか／どうグルーピングするか」
 という表示上の取捨選択のみ行う）。
 
-レポート構成（4セクション + Appendix。2026-10-13改善指示書で「全体アクセス → SEO順位 → AIO引用 → 詳細」
-の流れに再構成。表示順の正本はrender_html.py/render_md.py）:
+レポート構成（5セクション + Appendix。2026-10-13改善指示書で「全体アクセス → SEO順位 → AIO引用 → 詳細」
+の流れに再構成し、2026-10-27に②問い合わせ実績を追加。表示順の正本はrender_html.py/render_md.py）:
   ① サイト全体のアクセス状況（GA4） … 1段目: サイト全体/マガジン/Works/Service、2段目: 問い合わせ/資料請求
-  ② 今週の要点                      … 最大3項目（アクセス → SEO順位 → AIO引用）。数値の羅列ではなく変化を書く
-  ③ SEO検索順位                     … 重点4キーワードを1つの表で表示（順位・前週比・Imp・Click）
-  ④ AIO引用状況                     … 同じ4キーワードのAIO生成／TCD引用／主な引用元（最大3件）を独立した表で表示
+  ② 問い合わせ実績                  … config_v2/inquiries.yaml の確定済み件数（当週・直近4週累計。未入力は0件にしない）
+  ③ 今週の要点                      … 最大3項目（アクセス → SEO順位 → AIO引用）。数値の羅列ではなく変化を書く
+  ④ SEO検索順位                     … 重点4キーワードを1つの表で表示（順位・前週比・Imp・Click）
+  ⑤ AIO引用状況                     … 同じ4キーワードのAIO生成／TCD引用／TCD推薦／主な引用元（最大3件）を独立した表で表示
   Appendix                          … キーワード別詳細（クエリ内訳・AIO引用元全件・判定）・ページ別・未登録施策・データ品質等
 重点商談市場（deal）／テーマ市場（theme）の区分は内部データ（tier）として残し、見出しには出さない。
 参考クエリ（インナーブランディング会社×地域）はAppendixのキーワード別詳細に1行で表示する。
@@ -22,6 +23,7 @@ View Modelだけを参照することで、出力形式間の内容差異を防�
 from __future__ import annotations
 
 import re
+from datetime import date, timedelta
 
 from src_v2 import config_loader
 
@@ -145,6 +147,80 @@ def _build_site_usage(ga4_summary: dict) -> dict:
     return {"segments": segments, "rows": [row for row in (top, cv) if row]}
 
 
+# ── ② 問い合わせ実績（config_v2/inquiries.yaml の確定済み件数） ──────────
+
+# 表示順。「うち」は一般問い合わせの内訳。専用採用フォームは一般問い合わせとは別集計
+_INQUIRY_ROWS = [
+    ("general_total", "一般問い合わせ"),
+    ("project_consultation", "うち案件相談"),
+    ("sales_solicitation", "うち売り込み・提携勧誘"),
+    ("other", "うちその他"),
+    ("recruiting_form", "専用採用フォーム（別集計）"),
+]
+_INQUIRY_CUMULATIVE_WEEKS = (4, 12)
+INQUIRY_NOTES = [
+    "Dot・担当者が問い合わせ通知メールで確認した件数（通知メールへの返信は除く）。サーバー側の未着分は未確認。",
+    "分類はフォームの選択項目ではなく本文の内容による。判断が難しいものは「その他（要確認）」に含める。",
+    "案件相談は週ごとの変動が大きいため、施策の評価には4週・12週の累計を使う。累計は対象週がすべて入力済みの場合のみ表示する。",
+]
+
+
+def _week_windows(cur_start: str, weeks: int) -> list[tuple[str, str]]:
+    """対象週を末尾とする連続した7日間 weeks 個（古い順）。"""
+    start = date.fromisoformat(cur_start)
+    return [((start - timedelta(days=7 * k)).isoformat(), (start - timedelta(days=7 * k - 6)).isoformat())
+            for k in reversed(range(weeks))]
+
+
+def _build_inquiries(inquiries_cfg: list[dict], period: dict) -> dict:
+    """当週と直近4週・12週累計。未入力の週は0件として扱わない（当週は「未入力」、累計は欠けがあれば未確定）。"""
+    by_window = {(w["start"], w["end"]): w for w in inquiries_cfg}
+    current = by_window.get((period["cur_start"], period["cur_end"]))
+
+    cumulative = {}
+    for weeks in _INQUIRY_CUMULATIVE_WEEKS:
+        entries = [by_window.get(window) for window in _week_windows(period["cur_start"], weeks)]
+        entered = [e for e in entries if e is not None]
+        complete = len(entered) == weeks
+        cumulative[weeks] = {
+            "weeks": weeks,
+            "entered_weeks": len(entered),
+            "complete": complete,
+            "counts": {key: sum(e[key] for e in entered) for key, _ in _INQUIRY_ROWS} if complete else None,
+            "other_needs_review": sum(e["other_needs_review"] for e in entered) if complete else None,
+        }
+
+    rows = []
+    for key, label in _INQUIRY_ROWS:
+        rows.append({
+            "key": key, "label": label,
+            "current": current[key] if current else None,
+            "cumulative_4w": cumulative[4]["counts"][key] if cumulative[4]["complete"] else None,
+            "cumulative_12w": cumulative[12]["counts"][key] if cumulative[12]["complete"] else None,
+        })
+    notes = []
+    if current is None:
+        notes.append("当週の件数は未入力（config_v2/inquiries.yaml）。0件ではない。")
+    elif current["other_needs_review"]:
+        notes.append(f"その他のうち要確認: {current['other_needs_review']}件")
+    case_12w = next(r for r in rows if r["key"] == "project_consultation")["cumulative_12w"]
+    notes.append(f"直近12週累計の案件相談: {inquiry_cumulative_label(cumulative[12], case_12w)}")
+    return {
+        "entered": current is not None,
+        "rows": rows,
+        "current_needs_review": current["other_needs_review"] if current else None,
+        "cumulative": cumulative,
+        "notes": notes + INQUIRY_NOTES,
+    }
+
+
+def inquiry_cumulative_label(cum: dict, value: int | None) -> str:
+    """累計セルの表示。欠けがある期間は件数を出さず「未確定（4週中1週入力）」とする。"""
+    if cum["complete"]:
+        return f"{value:,}"
+    return f"未確定（{cum['weeks']}週中{cum['entered_weeks']}週入力）"
+
+
 # ── ③ 重点市場（4市場固定・一覧表 + 詳細カード） ──────────────────
 
 _SEO_STATUS_LABELS = [
@@ -190,9 +266,26 @@ def _volume_label(evidence: dict) -> str | None:
 
 _AIO_TOP_SOURCES = 3
 
+# TCD推薦（AIO本文の会社一覧でTCDが推薦企業として紹介されたか）。引用とは独立に判定する。
+# 「判定不可」（本文・一覧を取得できない、取得エラー）は「なし」に含めない。
+_RECOMMENDATION_LABELS = {
+    "recommended": "あり",
+    "not_recommended": "なし",
+    "undeterminable": "判定不可",
+    "not_applicable": "対象外",  # 会社を探す検索ではない（「会社」を含まないキーワード）
+    "no_aio": "—",
+}
+
+
+def _recommendation_label(aio: dict) -> str:
+    """推薦判定がない（推薦列の導入前の analysis.json、AIO未取得）場合は「—」。"""
+    if "recommendation_status" not in aio:
+        return "—"
+    return _RECOMMENDATION_LABELS.get(aio.get("recommendation_status"), "—")
+
 
 def _aio_view(evidence: dict) -> dict:
-    """④ AIO引用状況の1行分。AIO生成／TCD引用／引用元を別々の列にする。
+    """⑤ AIO引用状況の1行分。AIO生成／TCD引用／TCD推薦／引用元を別々の列にする。
     未取得（観測なし・失敗）は「生成なし」と、引用元取得不可は「引用元なし」「TCD引用なし」と混同しない。"""
     aio = evidence.get("aio") or {}
     citations = evidence.get("aio_citations") or {}
@@ -203,7 +296,8 @@ def _aio_view(evidence: dict) -> dict:
     unknown_count = citations.get("unknown_count") or 0
     view = {"aio_generated_label": "未取得", "tcd_cited_label": "—", "aio_sources_label": "—",
             "aio_domains": domains, "aio_unknown_source_count": unknown_count,
-            "tcd_cited": None, "citation_unavailable": False}
+            "tcd_cited": None, "citation_unavailable": False,
+            "tcd_recommended_label": _recommendation_label(aio), "tcd_recommended": aio.get("tcd_recommended")}
     if aio.get("acquisition_status") not in ("success", "not_generated"):
         return view
     if not aio.get("aio_generated"):
@@ -387,9 +481,12 @@ def _build_initiatives_section(initiative_findings: list[dict]) -> tuple[dict, l
     return {"known": sort_findings(known), "unknown_count": len(unknown)}, unknown
 
 
-# ── ③ SEO検索順位の前週比表示 ─────────────────────────────────────
+# ── ④ SEO検索順位の前週比表示 ─────────────────────────────────────
 
 RELATED_QUERIES_NOTE = "関連クエリを含む集計"
+_RECOMMENDATION_NOTE = ("TCD推薦は、AIO本文の会社一覧でTCDが推薦企業として紹介されたか（引用とは別に判定）。"
+                        "「判定不可」は本文・会社一覧を取得できなかった場合で、「なし」には含めない。"
+                        "「対象外」は会社を探す検索ではないキーワード。")
 _AIO_NOTE = "定点観測した検索結果（週1回・各キーワード1回）についての判定。Google検索全体で引用されていないという意味ではない。引用元の全件はAppendix。"
 
 
@@ -436,7 +533,7 @@ def _delta_label(row: dict) -> str:
     return f"{_signed(delta)}（{movement}）"
 
 
-# ── ② 今週の要点 ────────────────────────────────────────────────
+# ── ③ 今週の要点 ────────────────────────────────────────────────
 
 def _access_highlight(site_usage: dict, thresholds_cfg: dict) -> str | None:
     change_pct = thresholds_cfg["display"]["access_change_pct"]
@@ -484,8 +581,26 @@ def _aio_highlight(rows: list[dict]) -> str | None:
     unavailable = [r["short_label"] for r in rows if r["citation_unavailable"]]
     unavailable_note = f"{'・'.join(unavailable)}はAIO本文を取得できず判定不可" if unavailable else ""
     if cited:
-        return f"AIOは{'・'.join(cited)}でTCD引用あり" + (f"（{unavailable_note}）" if unavailable_note else "") + "。"
-    return f"定点観測{len(rows)}クエリではTCDのAIO引用を確認できず" + (f"（うち{unavailable_note}）" if unavailable_note else "") + "。"
+        line = f"AIOは{'・'.join(cited)}でTCD引用あり" + (f"（{unavailable_note}）" if unavailable_note else "") + "。"
+    else:
+        line = f"定点観測{len(rows)}クエリではTCDのAIO引用を確認できず" + (f"（うち{unavailable_note}）" if unavailable_note else "") + "。"
+    return line + _recommendation_highlight(rows)
+
+
+def _recommendation_highlight(rows: list[dict]) -> str:
+    """推薦を判定するキーワード（会社を探す検索）だけ。判定不可は「なし」と書かない。"""
+    by_label: dict[str, list[str]] = {}
+    for r in rows:
+        if r["tcd_recommended_label"] in ("あり", "なし", "判定不可"):
+            by_label.setdefault(r["tcd_recommended_label"], []).append(r["short_label"])
+    parts = []
+    if by_label.get("あり"):
+        parts.append(f"{'・'.join(by_label['あり'])}でTCD推薦あり")
+    if by_label.get("なし"):
+        parts.append(f"{'・'.join(by_label['なし'])}は推薦なし")
+    if by_label.get("判定不可"):
+        parts.append(f"{'・'.join(by_label['判定不可'])}は推薦を判定不可")
+    return ("、".join(parts) + "。") if parts else ""
 
 
 def _build_highlights(site_usage: dict, priority_markets: dict, thresholds_cfg: dict) -> list[str]:
@@ -513,9 +628,11 @@ def _data_quality_label(status: str, rows: list[dict]) -> str:
     return f"{status}（AIO {len(rows)}件中{len(unavailable)}件は本文取得不可：{'・'.join(unavailable)}）"
 
 
-def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_cfg: list[dict] | None = None) -> dict:
+def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_cfg: list[dict] | None = None,
+                     inquiries_cfg: list[dict] | None = None) -> dict:
     thresholds_cfg = thresholds_cfg or config_loader.load_thresholds()
     notes_cfg = config_loader.load_report_notes() if notes_cfg is None else notes_cfg
+    inquiries_cfg = config_loader.load_inquiries() if inquiries_cfg is None else inquiries_cfg
     display_cfg = thresholds_cfg["display"]
 
     findings = analysis["findings"]
@@ -594,11 +711,12 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_c
         "header": header,
         "executive_summary": {"blocks": executive_summary, "narrative": None},
         "site_usage": site_usage,
+        "inquiries": _build_inquiries(inquiries_cfg, analysis["period"]),
         "priority_markets": {
             **priority_markets,
             "search_volume_as_of": volume_as_of,
             "seo_notes": _seo_notes(volume_as_of),
-            "aio_notes": _period_notes(notes_cfg, "aio", analysis["period"]["cur_end"]) + [_AIO_NOTE],
+            "aio_notes": _period_notes(notes_cfg, "aio", analysis["period"]["cur_end"]) + [_AIO_NOTE, _RECOMMENDATION_NOTE],
         },
         "appendix": appendix,
     }
