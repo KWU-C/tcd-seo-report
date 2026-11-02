@@ -53,8 +53,8 @@ def build_reports(
     if narrative_path is not None:
         vm["executive_summary"]["narrative"] = narrative_path.read_text(encoding="utf-8")
 
-    period = vm["header"]["period"]
-    out_dir = output_root / f"{period['cur_start']}_{period['cur_end']}"
+    # 現行方式はレポート週（月〜日）、旧方式はGSC期間でフォルダを決める（view_model の periods.folder）
+    out_dir = output_root / vm["header"]["periods"]["folder"]
     out_dir.mkdir(parents=True, exist_ok=True)
 
     paths = {
@@ -73,11 +73,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="TCD週次SEO/AIOレポート v2 Phase 5 レポート生成")
     parser.add_argument("--analysis-path", help="analysis.jsonのパス。省略時はdata_v2/processed/配下の最新を使う")
     parser.add_argument("--narrative-file", help="①今週の結論に差し込む、Claude Code執筆済みの文章ファイル")
+    parser.add_argument("--output-root", default=str(REPORTS_DIR), help="出力先（dry-run では preview_v2/reports）")
     args = parser.parse_args()
 
     analysis_path = Path(args.analysis_path) if args.analysis_path else _latest_analysis_path()
     narrative_path = Path(args.narrative_file) if args.narrative_file else None
-    paths = build_reports(analysis_path, narrative_path=narrative_path)
+    paths = build_reports(analysis_path, output_root=Path(args.output_root), narrative_path=narrative_path)
 
     print(f"入力: {analysis_path}")
     for fmt, path in paths.items():

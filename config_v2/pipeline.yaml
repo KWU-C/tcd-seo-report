@@ -4,10 +4,15 @@
 
 gsc:
   data_cutoff:
-    # fixed: レポート生成日から offset_days 日を引いた日を「確定日」とみなす。
-    # Search Consoleは通常2〜3日の遅延があるため、未確定期間をレポート対象から除外する。
-    # auto（GSC APIで実データを確認して動的判定）はv3以降の拡張ポイント。今回はfixedのみ実装。
-    mode: fixed
+    # auto（2026-11-02〜）: レポート週＝前週の月〜日（日本時間。GA4・問い合わせの対象期間）。
+    #   GSCは「確定済みの最新7日間」。希望末日はレポート週の日曜から end_offset_days 日前（2＝金曜）で、
+    #   Search Console API（dataState=all）の firstIncompleteDate より前に収まらない場合は前にずらして注記する。
+    #   月曜朝の時点でGSCの土・日は未確定のため（2026-11-02実測）。日付はSearch Consoleの基準（米国太平洋時間）。
+    # fixed（〜2026-10-30の旧方式）: 実行日から offset_days 日を引いた日を末日とする7日間（GSC・GA4共通）。
+    mode: auto
+    end_offset_days: 2
+    # 確定の遅れがこれを超える場合は、期間がレポート週と大きくずれるため生成しない（失敗として通知）
+    max_shift_days: 6
     offset_days: 3
   report_period:
     length_days: 7
@@ -34,3 +39,12 @@ ga4:
     - key: document_request
       label: 資料請求ページ到達
       path_contains: "/download"
+
+# 問い合わせ実績（② 問い合わせ実績）の取得元（2026-11-02〜）。
+# Dot が集計した週次件数を Google スプレッドシート（TCD Workspace）に1週1行で記録し、パイプラインが読み取る。
+# スプレッドシートIDは .env の INQUIRY_SHEET_ID（Gitに入れない）。未設定・取得失敗でもレポート生成は止めない（「未集計」と表示）。
+# config_v2/inquiries.yaml は手入力の代替・訂正用で、値がある週はスプレッドシートより優先する。
+inquiries:
+  source: sheets
+  sheet_id_env: INQUIRY_SHEET_ID
+  range: "weekly!A1:M"

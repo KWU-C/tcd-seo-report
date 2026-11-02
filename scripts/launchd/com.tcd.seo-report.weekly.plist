@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  reports_v2 週次レポートの自動実行（2026-11-02 改訂）。
+  月曜 10:00 に起動（Dot の問い合わせ集計は 9:30 締め）。失敗・Mac停止時の再試行として
+  月曜 11:00・12:00、火・水 10:00 にも起動する。送信済みの週は scripts/weekly_report.sh が何もせずに終了する。
+  スリープ中に時刻を過ぎた場合は復帰時に1回実行される。電源オフ中に過ぎた分は実行されない。
+
+  ※ 最終承認まで有効化しない。有効化の手順（承認後）:
+     cp scripts/launchd/com.tcd.seo-report.weekly.plist ~/Library/LaunchAgents/
+     launchctl load -w ~/Library/LaunchAgents/com.tcd.seo-report.weekly.plist
+     sudo pmset repeat wakeorpoweron M 09:55:00
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tcd.seo-report.weekly</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/kwu/Documents/tcd-seo-report/scripts/weekly_report.sh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>10</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>11</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>12</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>10</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>10</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/kwu/Documents/tcd-seo-report/logs/launchd_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kwu/Documents/tcd-seo-report/logs/launchd_stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

@@ -9,7 +9,7 @@ status=="fail" の場合は DataQualityError を送出し、呼び出し側で
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src_v2.normalize import has_aio_content
@@ -204,7 +204,7 @@ def run_validation(
         status = DATA_QUALITY_PASS
 
     report = {
-        "run_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "run_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "status": status,
         "errors": errors,
         "warnings": warnings,

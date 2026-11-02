@@ -59,16 +59,19 @@ def _site_usage_section(site_usage: dict) -> str:
 
 # ── ② 問い合わせ実績 ─────────────────────────────────────────────
 
-def _count_label(value: int | None) -> str:
-    """当週の件数。未入力（None）は0件と区別して「未入力」と表示する。"""
-    return "未入力" if value is None else f"{value:,}"
+def _count_label(value: int | None, missing: str = "未入力") -> str:
+    """当週の件数。値が無い（None）週は0件と区別して「未入力」（現行方式は「未集計」）と表示する。"""
+    return missing if value is None else f"{value:,}"
 
 
 def _inquiries_section(inq: dict) -> str:
     cum4 = inq["cumulative"][4]
-    header = "| 項目 | 当週 | 直近4週累計 |\n|---|---:|---:|\n"
+    weekly = "status_label" in inq
+    missing = "未集計" if weekly else "未入力"
+    status = f"集計状況: **{inq['status_label']}**\n\n" if weekly else ""
+    header = status + "| 項目 | 当週 | 直近4週累計 |\n|---|---:|---:|\n"
     rows = [
-        f"| {row['label']} | {_count_label(row['current'])} | {inquiry_cumulative_label(cum4, row['cumulative_4w'])} |"
+        f"| {row['label']} | {_count_label(row['current'], missing)} | {inquiry_cumulative_label(cum4, row['cumulative_4w'])} |"
         for row in inq["rows"]
     ]
     return header + "\n".join(rows) + "\n\n" + "\n".join(f"- {n}" for n in inq["notes"]) + "\n"
@@ -242,6 +245,8 @@ def _appendix_section(appendix: dict, pm: dict, low_impressions_threshold: int) 
         f"- Finding件数: {dq.get('finding_count', 0)}件 {dq.get('severity_breakdown', {})}\n"
         f"- Confidence内訳: {dq.get('confidence_breakdown', {})}\n"
     )
+    if dq.get("extra_lines"):
+        parts.append("".join(f"- {line}\n" for line in dq["extra_lines"]))
     if dq.get("errors") or dq.get("warnings"):
         parts.append(f"- データ品質errors: {dq.get('errors', [])}\n- データ品質warnings: {dq.get('warnings', [])}\n")
 
@@ -262,29 +267,36 @@ def _appendix_section(appendix: dict, pm: dict, low_impressions_threshold: int) 
 
 def render_markdown(vm: dict) -> str:
     header = vm["header"]
-    period = header["period"]
     low_impressions_threshold = header["low_impressions_threshold"]
 
+    periods = header["periods"]
+    sec = periods["sections"]
+    notes = periods["notes"]
+
     parts: list[str] = []
-    parts.append(f"# TCD週次SEO/AIOレポート（{period['cur_start']} 〜 {period['cur_end']}）\n")
+    parts.append(f"# TCD週次SEO/AIOレポート（{periods['title']}）\n")
     parts.append(
-        f"対象期間: {period['cur_start']}〜{period['cur_end']}（データ確定基準: 実行日-3日オフセット） ／ "
+        f"{periods['header_note']} ／ "
         f"データ品質: {header['data_quality_label']} ／ 継続週数: {header.get('weeks_available', '-')}週\n"
     )
 
-    parts.append("## ① サイト全体のアクセス状況\n")
+    parts.append(f"## ① サイト全体のアクセス状況{sec['site_usage']}\n")
     parts.append(_site_usage_section(vm["site_usage"]))
+    if notes["site_usage"]:
+        parts.append("\n".join(f"- {n}" for n in notes["site_usage"]) + "\n")
 
-    parts.append("## ② 問い合わせ実績\n")
+    parts.append(f"## ② 問い合わせ実績{sec['inquiries']}\n")
     parts.append(_inquiries_section(vm["inquiries"]))
 
     parts.append("## ③ 今週の要点\n")
     parts.append(_highlights_section(vm["executive_summary"]))
 
-    parts.append("## ④ SEO検索順位\n")
+    parts.append(f"## ④ SEO検索順位{sec['seo']}\n")
     parts.append(_seo_table(vm["priority_markets"]))
+    if notes["seo"]:
+        parts.append("\n".join(f"- {n}" for n in notes["seo"]) + "\n")
 
-    parts.append("## ⑤ AIO引用状況\n")
+    parts.append(f"## ⑤ AIO引用状況{sec['aio']}\n")
     parts.append(_aio_table(vm["priority_markets"]))
 
     parts.append(_appendix_section(vm["appendix"], vm["priority_markets"], low_impressions_threshold))
