@@ -6,10 +6,20 @@
   月曜 11:00・12:00、火・水 10:00 にも起動する。送信済みの週は scripts/weekly_report.sh が何もせずに終了する。
   スリープ中に時刻を過ぎた場合は復帰時に1回実行される。電源オフ中に過ぎた分は実行されない。
 
-  ※ 最終承認まで有効化しない。有効化の手順（承認後）:
+  スリープ対策（2026-11-02、A案）:
+  - Mac全体のスリープ設定（1分）は変えない。pmset の繰り返し起動で月曜 10:00:00 に復帰させ、
+    復帰時に launchd が 10:00 の起動を実行する。
+  - 実行中にアイドルスリープしないよう、weekly_report.sh の冒頭で caffeinate -i -w <自分のPID> を起動する
+    （スクリプト終了で自動的に解除）。起動プログラムを /usr/bin/caffeinate にすると、~/Documents の
+    読み取りがプライバシー保護で拒否される（Operation not permitted、2026-11-02 に launchd で確認）ため使わない。
+    ※ 蓋を閉じた状態（外部ディスプレイなし）のスリープは caffeinate -i では防げない。
+
+  登録・更新の手順:
      cp scripts/launchd/com.tcd.seo-report.weekly.plist ~/Library/LaunchAgents/
-     launchctl load -w ~/Library/LaunchAgents/com.tcd.seo-report.weekly.plist
-     sudo pmset repeat wakeorpoweron M 09:55:00
+     launchctl bootout gui/$(id -u)/com.tcd.seo-report.weekly 2>/dev/null
+     launchctl enable gui/$(id -u)/com.tcd.seo-report.weekly
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tcd.seo-report.weekly.plist
+     sudo pmset repeat wakeorpoweron M 10:00:00
 -->
 <plist version="1.0">
 <dict>

@@ -62,6 +62,11 @@ fi
 cd "$PROJECT_DIR" || exit 1
 mkdir -p logs state
 
+# 実行中のアイドルスリープを防ぐ（2026-11-02、A案）。このスクリプトのプロセスが終わると caffeinate も終了する。
+# launchd の起動プログラムを caffeinate にすると、~/Documents の読み取りがプライバシー保護で拒否される
+# （Operation not permitted）ため、起動プログラムは /bin/bash のままにして、ここで caffeinate を起動する。
+/usr/bin/caffeinate -i -w $$ &
+
 SUFFIX=""
 [ "$DRY_RUN" -eq 1 ] && SUFFIX="_dryrun"
 [ "$TEST_SEND" -eq 1 ] && SUFFIX="_testsend"

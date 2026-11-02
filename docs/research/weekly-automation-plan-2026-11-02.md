@@ -234,4 +234,4 @@
 3. `.env` に `INQUIRY_SHEET_ID=<スプレッドシートID>` を追加する。
 4. `.venv/bin/python -m src_v2.fetch_inquiries --authorize` を実行し、ブラウザでシートを読めるWorkspaceアカウントで認可する（`token_sheets.pickle`）。
 5. 上記のあと、実際のシートからの読み取りを検証する（確定・集計中・不整合の行で確認）。
-6. kawauchi@tcd.jp へのテスト送信（承認後）、マージ、launchd の有効化と `pmset repeat wakeorpoweron M 09:55:00`（承認後）。
+6. kawauchi@tcd.jp へのテスト送信（承認後）、マージ、launchd の有効化と `pmset repeat wakeorpoweron M 10:00:00`（承認後）。※ 2026-11-02 変更: 9:55 ではスリープ設定（1分）により10:00前に再スリープするため、10:00:00 に復帰させ、ジョブを caffeinate -i で包む（A案）。
