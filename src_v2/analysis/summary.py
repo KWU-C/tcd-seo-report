@@ -35,11 +35,60 @@ def _load_bundle(period_dir: Path) -> dict:
     return json.loads((period_dir / "normalized.json").read_text(encoding="utf-8"))
 
 
-def _find_previous_bundle(processed_root: Path, period: dict) -> dict | None:
-    prv_dir = processed_root / f"{period['prv_start']}_{period['prv_end']}"
-    if (prv_dir / "normalized.json").exists():
-        return _load_bundle(prv_dir)
+def _find_dir_by_gsc_period(processed_root: Path, start: str, end: str) -> Path | None:
+    """GSCの対象期間が start〜end の処理済みフォルダ。
+
+    旧方式（〜2026-10-30）はフォルダ名＝GSC期間、新方式はフォルダ名＝レポート週（月〜日）のため、
+    フォルダ名ではなく normalized.json の period で探す。旧方式の名前が一致すればそれを優先する。
+    """
+    legacy = processed_root / f"{start}_{end}"
+    if (legacy / "normalized.json").exists():
+        return legacy
+    if not processed_root.exists():
+        return None
+    matches = [
+        d for d in _period_dirs(processed_root)
+        if (lambda p: p.get("cur_start") == start and p.get("cur_end") == end)(_load_bundle(d)["period"])
+    ]
+    return matches[-1] if matches else None
+
+
+def _find_dir_by_report_week(processed_root: Path, start: str, end: str) -> Path | None:
+    d = processed_root / f"{start}_{end}"
+    if (d / "normalized.json").exists() and _load_bundle(d)["period"].get("report_week_start") == start:
+        return d
     return None
+
+
+def _find_previous_bundle(processed_root: Path, period: dict) -> dict | None:
+    prv_dir = _find_dir_by_gsc_period(processed_root, period["prv_start"], period["prv_end"])
+    return _load_bundle(prv_dir) if prv_dir else None
+
+
+def _ga4_revision(bundle: dict, processed_root: Path) -> dict | None:
+    """前週レポートのGA4値（速報値）と、今回比較期間として取り直した値の差。
+
+    GA4は日曜分の処理が月曜朝に終わっていない可能性があるため、差を記録して速報値の信頼度を確認する。
+    新方式の前週フォルダが無い場合（移行1週目など）は None。
+    """
+    period = bundle["period"]
+    if "ga4_prv_start" not in period:
+        return None
+    prv_dir = _find_dir_by_report_week(processed_root, period["ga4_prv_start"], period["ga4_prv_end"])
+    if prv_dir is None:
+        return None
+    previous = _load_bundle(prv_dir).get("ga4") or {}
+    result = {}
+    for key, seg in (bundle.get("ga4") or {}).items():
+        first = (previous.get(key) or {}).get("current")
+        refetched = seg.get("comparison")
+        if first is None or refetched is None:
+            continue
+        result[key] = {
+            "label": seg.get("label", key), "first": first, "refetched": refetched,
+            "delta_pct": round((refetched - first) / first * 100, 1) if first else None,
+        }
+    return {"period": {"start": period["ga4_prv_start"], "end": period["ga4_prv_end"]}, "segments": result}
 
 
 def _recent_bundles(processed_root: Path, up_to_cur_end: str, max_periods: int = 4) -> list[tuple[str, dict]]:
@@ -75,7 +124,8 @@ def _annotate_persistence(findings: list[dict], processed_root: Path, period: di
     「今週やること」の「2週以上継続」判定に使う。前週のanalysis.jsonが無い場合は
     継続性を判定できないため previous_available=False とし、連続週数は1とする（安全側）。
     """
-    prv_path = processed_root / f"{period['prv_start']}_{period['prv_end']}" / "analysis.json"
+    prv_dir = _find_dir_by_gsc_period(processed_root, period["prv_start"], period["prv_end"])
+    prv_path = (prv_dir or processed_root / f"{period['prv_start']}_{period['prv_end']}") / "analysis.json"
     previous = {}
     if prv_path.exists():
         previous = {f["id"]: f for f in json.loads(prv_path.read_text(encoding="utf-8"))["findings"]}
@@ -155,6 +205,8 @@ def run_analysis(
         "data_summary": _data_summary(bundle, excluded_cfg),
         "weeks_available": weeks_available,
         "ga4_summary": bundle.get("ga4", {}),
+        "ga4_revision": _ga4_revision(bundle, processed_root),
+        "inquiries_snapshot": bundle.get("inquiries_snapshot"),
         "findings": findings,
         "counts": _counts(findings),
     }
@@ -178,7 +230,8 @@ def main() -> None:
             sys.exit(1)
         period_dir = dirs[-1]
 
-    out_path = run_analysis(period_dir)
+    # 前週データの探索は、指定した期間フォルダと同じ場所（dry-run では preview_v2/ 側）で行う
+    out_path = run_analysis(period_dir, processed_root=period_dir.parent)
     analysis = json.loads(out_path.read_text(encoding="utf-8"))
     print(f"分析結果出力: {out_path}")
     print(f"Finding数: {analysis['counts']['total']} {analysis['counts']['by_severity']}")

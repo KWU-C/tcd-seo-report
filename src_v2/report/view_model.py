@@ -173,7 +173,8 @@ def _week_windows(cur_start: str, weeks: int) -> list[tuple[str, str]]:
 
 
 def _build_inquiries(inquiries_cfg: list[dict], period: dict) -> dict:
-    """当週と直近4週・12週累計。未入力の週は0件として扱わない（当週は「未入力」、累計は欠けがあれば未確定）。"""
+    """旧方式（〜2026-10-30、レポート週を持たない analysis.json）の②。過去のレポートを同じ内容で再生成するため残す。
+    当週と直近4週・12週累計。未入力の週は0件として扱わない（当週は「未入力」、累計は欠けがあれば未確定）。"""
     by_window = {(w["start"], w["end"]): w for w in inquiries_cfg}
     current = by_window.get((period["cur_start"], period["cur_end"]))
 
@@ -214,11 +215,117 @@ def _build_inquiries(inquiries_cfg: list[dict], period: dict) -> dict:
     }
 
 
+# ── ② 問い合わせ実績（現行: 月〜日。スプレッドシート＋手入力） ──────────
+
+# 週ごとの状態。confirmed 以外は件数を出さず「未集計」と表示し、累計にも入れない（0件として扱わない）
+INQUIRY_CONFIRMED_MANUAL = "confirmed_manual"
+INQUIRY_CONFIRMED_SHEET = "confirmed_sheet"
+INQUIRY_NOT_COUNTED = "not_counted"          # 行が無い・集計中
+INQUIRY_INVALID = "invalid"                  # スプレッドシートの行が検査に通らない
+INQUIRY_FETCH_FAILED = "fetch_failed"        # スプレッドシートを取得できない
+INQUIRY_NOT_CONFIGURED = "not_configured"    # スプレッドシートが未設定
+
+_INQUIRY_STATUS_LABELS = {
+    INQUIRY_CONFIRMED_MANUAL: "確定（手入力）",
+    INQUIRY_CONFIRMED_SHEET: "確定（Dot集計）",
+    INQUIRY_NOT_COUNTED: "未集計（Dotの集計が未完了。0件ではない）",
+    INQUIRY_INVALID: "未集計（スプレッドシートの集計値に不整合があり確認中。0件ではない）",
+    INQUIRY_FETCH_FAILED: "未集計（スプレッドシートを取得できなかった。0件ではない）",
+    INQUIRY_NOT_CONFIGURED: "未集計（スプレッドシートが未設定。0件ではない）",
+}
+
+WEEKLY_INQUIRY_NOTES = [
+    "Dotが問い合わせ通知メールで確認・分類した件数（通知メールへの返信は除く）。サーバー側の未着分は未確認。",
+    "分類はフォームの選択項目ではなく本文の内容による。判断が難しいものは「その他（要確認）」に含める。",
+    "案件相談は週ごとの変動が大きいため、施策の評価には4週・12週の累計を使う。累計は対象週がすべて集計済みの場合のみ表示する。",
+]
+
+
+def _resolve_inquiry_week(start: str, end: str, manual: dict, sheet_rows: dict, snapshot: dict | None) -> dict:
+    """1週分の値と状態。優先順: 手入力（inquiries.yaml）→ スプレッドシートの確定行 → 未集計。"""
+    from src_v2.fetch_inquiries import ROW_CONFIRMED, ROW_INVALID, SNAPSHOT_FETCH_FAILED, SNAPSHOT_NOT_CONFIGURED
+
+    row = sheet_rows.get(start)
+    entry = manual.get((start, end))
+    warnings = []
+    if entry is not None:
+        if row and row["state"] == ROW_CONFIRMED and any(row[k] != entry[k] for k, _ in _INQUIRY_ROWS):
+            warnings.append(f"{start}〜{end}: 手入力とスプレッドシートの値が異なるため、手入力を使用")
+        return {"start": start, "end": end, "status": INQUIRY_CONFIRMED_MANUAL, "values": entry, "warnings": warnings}
+    snapshot_status = (snapshot or {}).get("status")
+    if row and row["state"] == ROW_CONFIRMED:
+        return {"start": start, "end": end, "status": INQUIRY_CONFIRMED_SHEET, "values": row, "warnings": warnings,
+                "confirmed_at": row.get("confirmed_at")}
+    if row and row["state"] == ROW_INVALID:
+        warnings.append(f"{start}〜{end}: スプレッドシートの集計値に不整合（{'／'.join(row['errors'])}）")
+        return {"start": start, "end": end, "status": INQUIRY_INVALID, "values": None, "warnings": warnings}
+    if snapshot is None or snapshot_status == SNAPSHOT_NOT_CONFIGURED:
+        status = INQUIRY_NOT_CONFIGURED
+    elif snapshot_status == SNAPSHOT_FETCH_FAILED:
+        status = INQUIRY_FETCH_FAILED
+    else:
+        status = INQUIRY_NOT_COUNTED
+    return {"start": start, "end": end, "status": status, "values": None, "warnings": warnings}
+
+
+def _build_weekly_inquiries(inquiries_cfg: list[dict], snapshot: dict | None, period: dict) -> dict:
+    """現行方式の②（レポート週＝月〜日）。未集計でも生成は止めず、状態を明示する。"""
+    manual = {(w["start"], w["end"]): w for w in inquiries_cfg
+              if w.get("scheme", config_loader.INQUIRY_SCHEME_WEEKLY) == config_loader.INQUIRY_SCHEME_WEEKLY}
+    sheet_rows = {r["week_start"]: r for r in (snapshot or {}).get("rows", [])}
+    week_start = period["report_week_start"]
+
+    resolved = {}
+    for window in _week_windows(week_start, max(_INQUIRY_CUMULATIVE_WEEKS)):
+        resolved[window] = _resolve_inquiry_week(*window, manual, sheet_rows, snapshot)
+    current = resolved[(week_start, period["report_week_end"])]
+    confirmed = {INQUIRY_CONFIRMED_MANUAL, INQUIRY_CONFIRMED_SHEET}
+
+    cumulative = {}
+    for weeks in _INQUIRY_CUMULATIVE_WEEKS:
+        entries = [resolved[w] for w in _week_windows(week_start, weeks)]
+        done = [e["values"] for e in entries if e["status"] in confirmed]
+        complete = len(done) == weeks
+        cumulative[weeks] = {
+            "weeks": weeks, "entered_weeks": len(done), "complete": complete, "done_label": "集計済み",
+            "counts": {key: sum(e[key] for e in done) for key, _ in _INQUIRY_ROWS} if complete else None,
+            "other_needs_review": sum(e["other_needs_review"] for e in done) if complete else None,
+        }
+
+    values = current["values"] if current["status"] in confirmed else None
+    rows = [{
+        "key": key, "label": label,
+        "current": values[key] if values else None,
+        "cumulative_4w": cumulative[4]["counts"][key] if cumulative[4]["complete"] else None,
+        "cumulative_12w": cumulative[12]["counts"][key] if cumulative[12]["complete"] else None,
+    } for key, label in _INQUIRY_ROWS]
+
+    notes = []
+    if values and values["other_needs_review"]:
+        notes.append(f"その他のうち要確認: {values['other_needs_review']}件")
+    case_12w = next(r for r in rows if r["key"] == "project_consultation")["cumulative_12w"]
+    notes.append(f"直近12週累計の案件相談: {inquiry_cumulative_label(cumulative[12], case_12w)}")
+    warnings = [w for e in resolved.values() for w in e["warnings"]]
+    if snapshot and snapshot.get("error") and snapshot.get("status") != "ok":
+        warnings.insert(0, f"問い合わせ集計スプレッドシート: {snapshot['error']}")
+    return {
+        "scheme": config_loader.INQUIRY_SCHEME_WEEKLY,
+        "entered": values is not None,
+        "status": current["status"],
+        "status_label": _INQUIRY_STATUS_LABELS[current["status"]],
+        "rows": rows,
+        "current_needs_review": values["other_needs_review"] if values else None,
+        "cumulative": cumulative,
+        "notes": notes + WEEKLY_INQUIRY_NOTES,
+        "warnings": warnings,
+    }
+
+
 def inquiry_cumulative_label(cum: dict, value: int | None) -> str:
     """累計セルの表示。欠けがある期間は件数を出さず「未確定（4週中1週入力）」とする。"""
     if cum["complete"]:
         return f"{value:,}"
-    return f"未確定（{cum['weeks']}週中{cum['entered_weeks']}週入力）"
+    return f"未確定（{cum['weeks']}週中{cum['entered_weeks']}週{cum.get('done_label', '入力')}）"
 
 
 # ── ③ 重点市場（4市場固定・一覧表 + 詳細カード） ──────────────────
@@ -628,6 +735,68 @@ def _data_quality_label(status: str, rows: list[dict]) -> str:
     return f"{status}（AIO {len(rows)}件中{len(unavailable)}件は本文取得不可：{'・'.join(unavailable)}）"
 
 
+_WEEKDAYS = "月火水木金土日"
+
+
+def _md(iso: str, weekday: bool = True) -> str:
+    d = date.fromisoformat(iso)
+    return f"{d.month}/{d.day}({_WEEKDAYS[d.weekday()]})" if weekday else f"{d.month}/{d.day}"
+
+
+def _build_periods(period: dict, ga4_revision: dict | None) -> dict:
+    """レポートの対象期間の表示。現行方式（レポート週あり）はデータごとに期間を分けて明記する。
+    旧方式の analysis.json は従来どおり1つの期間（GSC＝GA4）で表示する。"""
+    if "report_week_start" not in period:
+        return {
+            "scheme": "legacy",
+            "title": f"{period['cur_start']} 〜 {period['cur_end']}",
+            "header_note": f"対象期間: {period['cur_start']}〜{period['cur_end']}（データ確定基準: 実行日-3日オフセット）",
+            "folder": f"{period['cur_start']}_{period['cur_end']}",
+            "sections": {"site_usage": "", "inquiries": "", "seo": "", "aio": ""},
+            "notes": {"site_usage": [], "seo": []},
+        }
+    week = f"{_md(period['report_week_start'])}〜{_md(period['report_week_end'])}"
+    gsc = f"{_md(period['cur_start'])}〜{_md(period['cur_end'])}"
+    observed = period.get("aio_observed_at")
+    aio = ""
+    if observed:
+        ts = observed[:16]
+        aio = f"{_md(ts[:10])} {ts[11:16]} 観測"
+    parts = [f"アクセス・問い合わせ: {week}", f"検索順位: {gsc}（Search Consoleの確定済み最新7日）"]
+    if aio:
+        parts.append(f"AIO: {aio}")
+    seo_notes = [f"検索順位はSearch Consoleで確定済みの最新7日間（{gsc}、米国太平洋時間）。前週比は直前の7日間（{_md(period['prv_start'])}〜{_md(period['prv_end'])}）との比較。"]
+    if period.get("gsc_shift_days"):
+        seo_notes.append(f"Search Consoleのデータ確定が遅れているため、通常より{period['gsc_shift_days']}日前までの期間で集計した。")
+    site_notes = ["当週の値は速報値（日曜分はGA4の処理中の可能性がある）。前週の値は今回取り直した値。"]
+    return {
+        "scheme": "weekly",
+        "title": f"{period['report_week_start']} 〜 {period['report_week_end']}",
+        "header_note": "対象期間: " + " ／ ".join(parts),
+        "folder": f"{period['report_week_start']}_{period['report_week_end']}",
+        "sections": {"site_usage": f"（{week}）", "inquiries": f"（{week}）", "seo": f"（{gsc}）", "aio": f"（{aio}）" if aio else ""},
+        "notes": {"site_usage": site_notes, "seo": seo_notes},
+        "ga4_revision": ga4_revision,
+    }
+
+
+def _data_quality_extra_lines(periods: dict, inquiries: dict) -> list[str]:
+    """Appendix「データ品質」の追加行（現行方式のみ）: 期間の決め方・GA4速報値の再取得差・問い合わせ集計の警告。"""
+    if periods["scheme"] != "weekly":
+        return []
+    lines = [periods["header_note"]]
+    revision = periods.get("ga4_revision")
+    if revision and revision.get("segments"):
+        diffs = "、".join(
+            f"{seg['label']} {seg['first']:,}→{seg['refetched']:,}"
+            + (f"（{seg['delta_pct']:+.1f}%）" if seg.get("delta_pct") is not None else "")
+            for seg in revision["segments"].values())
+        lines.append(f"前週GA4（{revision['period']['start']}〜{revision['period']['end']}）の速報値→再取得値: {diffs}")
+    lines.append(f"問い合わせ集計: {inquiries.get('status_label', '-')}")
+    lines += [f"問い合わせ集計の警告: {w}" for w in inquiries.get("warnings", [])]
+    return lines
+
+
 def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_cfg: list[dict] | None = None,
                      inquiries_cfg: list[dict] | None = None) -> dict:
     thresholds_cfg = thresholds_cfg or config_loader.load_thresholds()
@@ -667,8 +836,15 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_c
     data_quality = analysis["data_quality"]
     data_summary = analysis.get("data_summary", {})
 
+    periods = _build_periods(analysis["period"], analysis.get("ga4_revision"))
+    if periods["scheme"] == "weekly":
+        inquiries = _build_weekly_inquiries(inquiries_cfg, analysis.get("inquiries_snapshot"), analysis["period"])
+    else:
+        inquiries = _build_inquiries(inquiries_cfg, analysis["period"])
+
     header = {
         "period": analysis["period"],
+        "periods": periods,
         "comparison_available": data_summary.get("gsc", {}).get("comparison_available"),
         "data_quality_status": data_quality["status"],
         "data_quality_label": _data_quality_label(data_quality["status"], priority_markets["table"]),
@@ -702,6 +878,7 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_c
             "finding_count": analysis["counts"]["total"],
             "severity_breakdown": analysis["counts"]["by_severity"],
             "confidence_breakdown": confidence_breakdown,
+            "extra_lines": _data_quality_extra_lines(periods, inquiries),
         },
     }
 
@@ -711,7 +888,7 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_c
         "header": header,
         "executive_summary": {"blocks": executive_summary, "narrative": None},
         "site_usage": site_usage,
-        "inquiries": _build_inquiries(inquiries_cfg, analysis["period"]),
+        "inquiries": inquiries,
         "priority_markets": {
             **priority_markets,
             "search_volume_as_of": volume_as_of,

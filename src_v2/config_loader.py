@@ -94,6 +94,12 @@ INQUIRY_COUNT_KEYS = (
 )
 _INQUIRY_BREAKDOWN_KEYS = ("project_consultation", "sales_solicitation", "other")
 
+# 集計方式（2026-11-02〜）。weekly_mon_sun: 月〜日（現行）。legacy_sun_sat: 2026-10-30以前の旧方式の週
+# （レポートの対象期間に合わせた日〜土など）。値は保持するが、現行方式の4週・12週累計には入れない。
+INQUIRY_SCHEME_WEEKLY = "weekly_mon_sun"
+INQUIRY_SCHEME_LEGACY = "legacy_sun_sat"
+_INQUIRY_SCHEMES = {INQUIRY_SCHEME_WEEKLY, INQUIRY_SCHEME_LEGACY}
+
 
 def _parse_date(value: Any, label: str) -> date:
     try:
@@ -130,12 +136,20 @@ def load_inquiries(path: Path | str = CONFIG_DIR / "inquiries.yaml") -> list[dic
                 f"（案件相談+売り込み・提携勧誘+その他）が一般問い合わせ {w['general_total']} と一致しない")
         if w["other_needs_review"] > w["other"]:
             raise InquiriesConfigError(f"inquiries.yaml: {label}（{start}〜{end}）の other_needs_review が other を超えている")
-        parsed.append({**w, "start": start.isoformat(), "end": end.isoformat()})
+        scheme = w.get("scheme") or (INQUIRY_SCHEME_WEEKLY if start.weekday() == 0 else INQUIRY_SCHEME_LEGACY)
+        if scheme not in _INQUIRY_SCHEMES:
+            raise InquiriesConfigError(f"inquiries.yaml: {label}（{start}〜{end}）の scheme が不正: {scheme!r}")
+        if scheme == INQUIRY_SCHEME_WEEKLY and start.weekday() != 0:
+            raise InquiriesConfigError(f"inquiries.yaml: {label}（{start}〜{end}）は {scheme} だが月曜始まりではない")
+        parsed.append({**w, "start": start.isoformat(), "end": end.isoformat(), "scheme": scheme})
 
     ordered = sorted(parsed, key=lambda w: w["start"])
-    for prev, cur in zip(ordered, ordered[1:]):
-        if cur["start"] <= prev["end"]:
-            raise InquiriesConfigError(f"inquiries.yaml: 期間が重複している（{prev['start']}〜{prev['end']} と {cur['start']}〜{cur['end']}）")
+    # 期間の重複は同じ集計方式どうしで検査する（旧方式の日〜土と現行の月〜日は1日ずつ重なるが、別の系列として扱う）
+    for scheme in _INQUIRY_SCHEMES:
+        same = [w for w in ordered if w["scheme"] == scheme]
+        for prev, cur in zip(same, same[1:]):
+            if cur["start"] <= prev["end"]:
+                raise InquiriesConfigError(f"inquiries.yaml: 期間が重複している（{prev['start']}〜{prev['end']} と {cur['start']}〜{cur['end']}）")
     return ordered
 
 

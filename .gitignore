@@ -2,6 +2,7 @@
 credentials.json
 token.pickle
 token_ga4.pickle
+token_sheets.pickle
 .env
 API key.txt
 SerpApi.txt
@@ -47,3 +48,6 @@ preview_v2/
 
 # AIO日次データ再解析（aio_daily_reanalyze.py）前の元データのバックアップ（ローカル保持のみ）
 data/aio/backup/
+
+# 週次自動運用の実行状態（送信済み台帳・ロック）。端末ごとの状態のためコミット対象外
+state/

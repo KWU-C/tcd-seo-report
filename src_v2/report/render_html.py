@@ -113,9 +113,9 @@ def _site_tile_html(seg: dict) -> str:
 
 # ── ② 問い合わせ実績（config_v2/inquiries.yaml の確定済み件数） ──────────
 
-def _inquiry_count_html(value: int | None) -> str:
-    """当週の件数。未入力（None）は0件と区別して「未入力」と表示する。"""
-    return '<span class="muted">未入力</span>' if value is None else f"{value:,}"
+def _inquiry_count_html(value: int | None, missing: str = "未入力") -> str:
+    """当週の件数。値が無い（None）週は0件と区別して「未入力」（現行方式は「未集計」）と表示する。"""
+    return f'<span class="muted">{missing}</span>' if value is None else f"{value:,}"
 
 
 def _inquiry_cumulative_html(cum: dict, value: int | None) -> str:
@@ -125,6 +125,12 @@ def _inquiry_cumulative_html(cum: dict, value: int | None) -> str:
 
 def _inquiries_html(inq: dict) -> str:
     cum4 = inq["cumulative"][4]
+    weekly = "status_label" in inq
+    missing = "未集計" if weekly else "未入力"
+    status_html = ""
+    if weekly:
+        cls = "" if inq["entered"] else ' class="inquiry-status-missing"'
+        status_html = f'<p class="note">集計状況: <strong{cls}>{escape(inq["status_label"])}</strong></p>'
     rows = []
     for row in inq["rows"]:
         # 案件相談は最終的な営業成果指標のため強調する
@@ -132,10 +138,10 @@ def _inquiries_html(inq: dict) -> str:
         rows.append(f"""
       <tr>
         <td>{label}</td>
-        <td class="num">{_inquiry_count_html(row['current'])}</td>
+        <td class="num">{_inquiry_count_html(row['current'], missing)}</td>
         <td class="num">{_inquiry_cumulative_html(cum4, row['cumulative_4w'])}</td>
       </tr>""")
-    return f"""
+    return f"""{status_html}
     <table class="pages-table market-table inquiry-table">
       <thead>
         <tr><th>項目</th><th class="num">当週</th><th class="num">直近4週累計</th></tr>
@@ -378,6 +384,7 @@ def _appendix_data_quality_html(dq: dict) -> str:
       <li>AIO取得状況: {escape(str(aio))}</li>
       <li>Finding件数: {dq.get('finding_count', 0)}件（{escape(str(sev))}）</li>
       <li>Confidence内訳: {escape(str(conf))}</li>
+      {"".join(f"<li>{escape(line)}</li>" for line in dq.get("extra_lines", []))}
       {errors_warnings}
     </ul>"""
 
@@ -587,6 +594,7 @@ _STYLE = """
   .judgment { font-size: .85rem; color: var(--text-secondary); margin-top: .35rem; }
   .empty { color: var(--text-muted); font-style: italic; }
   .note { color: var(--text-secondary); font-size: .85rem; }
+  .inquiry-status-missing { color: var(--status-critical); }
 
   /* tables */
   table.pages-table { border-collapse: collapse; width: 100%; font-size: .83rem; }
@@ -612,20 +620,22 @@ _STYLE = """
 
 def render_html(vm: dict) -> str:
     header = vm["header"]
-    period = header["period"]
+    periods = header["periods"]
+    sec = periods["sections"]
+    notes = periods["notes"]
 
     body = f"""
 <div class="report-root">
-<h1>TCD週次SEO/AIOレポート（{escape(period['cur_start'])} 〜 {escape(period['cur_end'])}）</h1>
-<p class="note">対象期間: {escape(period['cur_start'])}〜{escape(period['cur_end'])}（データ確定基準: 実行日-3日オフセット） ／ データ品質: {escape(header['data_quality_label'])} ／ 継続週数: {escape(str(header.get('weeks_available', '-')))}週</p>
+<h1>TCD週次SEO/AIOレポート（{escape(periods['title'])}）</h1>
+<p class="note">{escape(periods['header_note'])} ／ データ品質: {escape(header['data_quality_label'])} ／ 継続週数: {escape(str(header.get('weeks_available', '-')))}週</p>
 
 <section>
-  <h2>① サイト全体のアクセス状況</h2>
-  {_site_usage_html(vm["site_usage"])}
+  <h2>① サイト全体のアクセス状況{escape(sec['site_usage'])}</h2>
+  {_site_usage_html(vm["site_usage"])}{_notes_html(notes["site_usage"]) if notes["site_usage"] else ""}
 </section>
 
 <section>
-  <h2>② 問い合わせ実績</h2>
+  <h2>② 問い合わせ実績{escape(sec['inquiries'])}</h2>
   {_inquiries_html(vm["inquiries"])}
 </section>
 
@@ -635,12 +645,12 @@ def render_html(vm: dict) -> str:
 </section>
 
 <section>
-  <h2>④ SEO検索順位</h2>
-  {_seo_table_html(vm["priority_markets"])}
+  <h2>④ SEO検索順位{escape(sec['seo'])}</h2>
+  {_seo_table_html(vm["priority_markets"])}{_notes_html(notes["seo"]) if notes["seo"] else ""}
 </section>
 
 <section>
-  <h2>⑤ AIO引用状況</h2>
+  <h2>⑤ AIO引用状況{escape(sec['aio'])}</h2>
   {_aio_table_html(vm["priority_markets"])}
 </section>
 
@@ -655,6 +665,6 @@ def render_html(vm: dict) -> str:
     return (
         f"<!doctype html><html lang=\"ja\"><head><meta charset=\"utf-8\">"
         f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        f"<title>TCD週次SEO/AIOレポート {escape(period['cur_start'])}〜{escape(period['cur_end'])}</title>"
+        f"<title>TCD週次SEO/AIOレポート {escape(periods['title'].replace(' ', ''))}</title>"
         f"{_STYLE}</head><body>{body}</body></html>"
     )
