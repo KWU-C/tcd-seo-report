@@ -28,18 +28,23 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] run#${n} $*" >> "$LOG"; }
 
 log "=== 開始（PID $$、親 PID $PPID: $(ps -o comm= -p "$PPID")）==="
 log "直前の復帰: $(pmset -g log | grep -E '^[0-9-]+ [0-9:]+ [+-][0-9]+ (Wake|DarkWake) ' | tail -1 | cut -c1-160)"
+log "蓋: $(ioreg -r -k AppleClamshellState -d 1 | grep -oE '"AppleClamshellState" = (Yes|No)' | sed 's/Yes/閉/;s/No/開/' | head -1)、電源: $(pmset -g batt | head -1 | sed "s/Now drawing from //")"
+log "前回から残っている caffeinate -w: $(ps -axo pid=,command= | grep -E '^ *[0-9]+ /usr/bin/caffeinate -i -w ' | grep -v -- "-w $$\$" | tr -s ' ' | tr '\n' ';' || true)（空なら解除済み）"
+log "他のスリープ防止（開始時）: $(pmset -g assertions | grep -E '^ +pid [0-9]+' | grep -E 'PreventUserIdleSystemSleep|NoIdleSleepAssertion|PreventSystemSleep' | grep -v 'caffeinate' | sed -E 's/^ +pid [0-9]+\(([^)]*)\).*named: "([^"]{0,40}).*/\1:\2/' | tr '\n' ';')"
 sleep 1
 log "スリープ防止のアサーション（このスクリプト分）: $(pmset -g assertions | grep -B1 "on behalf of Process ID $$\$" | tr -s ' \t' ' ' | tr '\n' ' ')"
 
 # 実行中にスリープしないか（途切れ＝スリープ）
-start=$(date +%s); prev=$start
+start=$(date +%s); prev=$start; held=0; checks=0
 while [ $(( $(date +%s) - start )) -lt "$HEARTBEAT_SECONDS" ]; do
   sleep 10
   now=$(date +%s)
   gap=$(( now - prev )); prev=$now
+  checks=$((checks + 1))
+  if pmset -g assertions | grep -q "on behalf of Process ID $$\$"; then held=$((held + 1)); else log "警告: このスクリプトのアサーションが無い"; fi
   [ "$gap" -gt 20 ] && log "警告: 記録が ${gap} 秒途切れた（スリープした可能性）"
 done
-log "心拍 ${HEARTBEAT_SECONDS} 秒: 最大の途切れなし判定は上の警告の有無で確認"
+log "心拍 ${HEARTBEAT_SECONDS} 秒: アサーション有効 ${checks} 回中 ${held} 回（途切れは上の警告で確認）"
 
 # 再試行の確認: 1回目は未完了の週で失敗させ、2回目以降は送らない dry-run で成功させる
 if [ "$n" -eq 1 ]; then
