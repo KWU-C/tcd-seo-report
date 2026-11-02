@@ -374,6 +374,32 @@ def test_force_resend_and_other_recipient_are_allowed(tmp_path):
     assert len(send.read_ledger(d, ledger)["sends"]) == 3
 
 
+def test_test_send_uses_separate_ledger_and_does_not_block_production(tmp_path, monkeypatch):
+    d, gmail = _report_dir(tmp_path), _FakeGmail()
+    monkeypatch.setattr(send, "SENT_LEDGER_DIR", tmp_path / "sent")
+    monkeypatch.setattr(send, "TEST_LEDGER_DIR", tmp_path / "sent_test")
+    send.send_report(d, "kawauchi@tcd.jp", gmail_service=gmail, test=True)
+    assert not (tmp_path / "sent").exists()
+    record = send.read_ledger(d, tmp_path / "sent_test")["sends"][0]
+    assert record["to"] == "kawauchi@tcd.jp" and record["subject"].startswith(send.TEST_SUBJECT_PREFIX)
+    # 本番の判定には現れない（本番台帳で見る）。本番の送信は通常どおり行われ、件名に【テスト送信】は付かない
+    assert send.already_sent(d, "kawauchi@tcd.jp", tmp_path / "sent") is None
+    send.send_report(d, "unei@tcd.jp", gmail_service=gmail)
+    prod = send.read_ledger(d, tmp_path / "sent")["sends"]
+    assert [r["to"] for r in prod] == ["unei@tcd.jp"] and not prod[0]["subject"].startswith(send.TEST_SUBJECT_PREFIX)
+    # 同じ宛先へのテスト再送はテスト台帳で止まる
+    with pytest.raises(send.AlreadySentError):
+        send.send_report(d, "kawauchi@tcd.jp", gmail_service=gmail, test=True)
+    assert len(gmail.sent) == 2
+
+
+def test_test_send_refuses_production_address(tmp_path):
+    d, gmail = _report_dir(tmp_path), _FakeGmail()
+    with pytest.raises(ValueError):
+        send.send_report(d, "UNEI@tcd.jp", ledger_dir=tmp_path / "t", gmail_service=gmail, test=True)
+    assert gmail.sent == []
+
+
 def test_send_cli_requires_report_dir(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["send", "--to", "unei@tcd.jp"])
     with pytest.raises(SystemExit):

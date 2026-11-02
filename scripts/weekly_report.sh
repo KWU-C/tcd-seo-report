@@ -17,7 +17,11 @@
 #   scripts/weekly_report.sh --dry-run           送信しない。preview_v2/ に出力（data_v2/・reports_v2/ は変更しない）
 #   scripts/weekly_report.sh --refetch           取得済みのデータがあっても取り直す
 #   scripts/weekly_report.sh --force-resend      送信済みの週を再送する（明示したときだけ）
-#   scripts/weekly_report.sh --to addr@tcd.jp    宛先を変える（テスト送信用）
+#   scripts/weekly_report.sh --to addr@tcd.jp    宛先を変える
+#   scripts/weekly_report.sh --test-send [--to addr@tcd.jp]
+#                                                テスト送信（既定の宛先は NOTIFY_EMAIL）。dry-run と同じく preview_v2/ に生成し、
+#                                                件名に【テスト送信】を付けて送る。記録は state/sent_test/ で、本番の台帳
+#                                                state/sent/ と data_v2/・reports_v2/ は変更しない（本番配信がスキップされない）
 set -uo pipefail
 
 PROJECT_DIR="/Users/kwu/Documents/tcd-seo-report"
@@ -33,10 +37,13 @@ WEEK=""
 DRY_RUN=0
 REFETCH=0
 FORCE_RESEND=0
+TEST_SEND=0
+TO_GIVEN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --week) WEEK="$2"; shift 2 ;;
-    --to) TO_EMAIL="$2"; shift 2 ;;
+    --to) TO_EMAIL="$2"; TO_GIVEN=1; shift 2 ;;
+    --test-send) TEST_SEND=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --refetch) REFETCH=1; shift ;;
     --force-resend) FORCE_RESEND=1; shift ;;
@@ -44,11 +51,23 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "$TEST_SEND" -eq 1 ]; then
+  [ "$DRY_RUN" -eq 1 ] && { echo "--test-send と --dry-run は同時に指定できない" >&2; exit 2; }
+  [ "$TO_GIVEN" -eq 0 ] && TO_EMAIL="$NOTIFY_EMAIL"
+  if [ "$(echo "$TO_EMAIL" | tr '[:upper:]' '[:lower:]')" = "unei@tcd.jp" ]; then
+    echo "テスト送信は本番の宛先（unei@tcd.jp）には送らない" >&2; exit 2
+  fi
+fi
+
 cd "$PROJECT_DIR" || exit 1
 mkdir -p logs state
 
 SUFFIX=""
 [ "$DRY_RUN" -eq 1 ] && SUFFIX="_dryrun"
+[ "$TEST_SEND" -eq 1 ] && SUFFIX="_testsend"
+# 生成先・通知を本番から切り離すか（dry-run とテスト送信）
+PREVIEW=0
+{ [ "$DRY_RUN" -eq 1 ] || [ "$TEST_SEND" -eq 1 ]; } && PREVIEW=1
 LOG_FILE="$PROJECT_DIR/logs/weekly_report_$(date +%Y%m%d_%H%M%S)${SUFFIX}.log"
 exec >>"$LOG_FILE" 2>&1
 
@@ -73,7 +92,7 @@ fi
 WEEK_END=$("$PYTHON" -c "from datetime import date; from src_v2.pipeline import get_report_week; print(get_report_week(week_start=date.fromisoformat('$WEEK'))['report_week_end'])") || { log "週の指定が不正（月曜日を YYYY-MM-DD で指定）: $WEEK"; exit 2; }
 FOLDER="${WEEK}_${WEEK_END}"
 
-if [ "$DRY_RUN" -eq 1 ]; then
+if [ "$PREVIEW" -eq 1 ]; then
   PROCESSED_ROOT="preview_v2/processed"
   REPORTS_ROOT="preview_v2/reports"
 else
@@ -81,7 +100,7 @@ else
   REPORTS_ROOT="reports_v2"
 fi
 
-log "=== 週次レポート開始 週=${FOLDER} dry-run=${DRY_RUN} 宛先=${TO_EMAIL} ==="
+log "=== 週次レポート開始 週=${FOLDER} dry-run=${DRY_RUN} test-send=${TEST_SEND} 宛先=${TO_EMAIL} ==="
 
 # ── ロック（同時実行の防止） ──────────────────────────────
 LOCK_DIR="state/weekly_report.lock"
@@ -99,7 +118,7 @@ echo $$ > "$LOCK_DIR/pid"
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
 # ── 送信済みなら何もしない ─────────────────────────────────
-if [ "$DRY_RUN" -eq 0 ] && [ "$FORCE_RESEND" -eq 0 ]; then
+if [ "$PREVIEW" -eq 0 ] && [ "$FORCE_RESEND" -eq 0 ]; then
   if "$PYTHON" -c "import sys; from pathlib import Path; from src_v2.report.send import already_sent; sys.exit(0 if already_sent(Path('$REPORTS_ROOT/$FOLDER'), '$TO_EMAIL') else 1)"; then
     log "${FOLDER} は ${TO_EMAIL} へ送信済み（state/sent/${FOLDER}.json）。終了する"
     exit 0
@@ -110,14 +129,14 @@ fail() {
   local step="$1"
   log "失敗: ${step}"
   local flags=()
-  [ "$DRY_RUN" -eq 1 ] && flags+=(--dry-run)
+  [ "$PREVIEW" -eq 1 ] && flags+=(--dry-run)
   "$PYTHON" -m src_v2.notify --kind failure --week "$WEEK" --to "$NOTIFY_EMAIL" \
     --step "$step" --log "$LOG_FILE" --next-retry "$(next_retry)" ${flags[@]+"${flags[@]}"}
   exit 1
 }
 
 # ── 1. 取得・検証・正規化 ─────────────────────────────────
-if [ "$DRY_RUN" -eq 1 ]; then
+if [ "$PREVIEW" -eq 1 ]; then
   # 前週比・継続性の判定に過去の処理済みデータが要るため、JSON だけを preview_v2/ に写す（data_v2/ は変更しない）
   mkdir -p "$PROCESSED_ROOT"
   rsync -a --include='*/' --include='normalized.json' --include='analysis.json' --exclude='*' \
@@ -148,6 +167,7 @@ else
   log "[4/4] send: ${TO_EMAIL}"
   SEND_FLAGS=()
   [ "$FORCE_RESEND" -eq 1 ] && SEND_FLAGS+=(--force-resend)
+  [ "$TEST_SEND" -eq 1 ] && SEND_FLAGS+=(--test)
   "$PYTHON" -m src_v2.report.send --report-dir "$REPORTS_ROOT/$FOLDER" --to "$TO_EMAIL" ${SEND_FLAGS[@]+"${SEND_FLAGS[@]}"}
   rc=$?
   if [ "$rc" -eq 3 ]; then
@@ -160,7 +180,7 @@ fi
 
 # ── 配信後の確認通知（要確認の項目がある場合のみ） ─────────────
 REVIEW_FLAGS=()
-[ "$DRY_RUN" -eq 1 ] && REVIEW_FLAGS+=(--dry-run)
+[ "$PREVIEW" -eq 1 ] && REVIEW_FLAGS+=(--dry-run)
 "$PYTHON" -m src_v2.notify --kind review --week "$WEEK" --to "$NOTIFY_EMAIL" --delivered-to "$TO_EMAIL" \
   --report-dir "$REPORTS_ROOT/$FOLDER" ${REVIEW_FLAGS[@]+"${REVIEW_FLAGS[@]}"} || log "確認通知を送れなかった（配信は完了）"
 

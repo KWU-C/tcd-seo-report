@@ -9,6 +9,11 @@ build.py（レポート生成）とは責務を分離する。ここでは既存
 - 送信に成功したら送信済み台帳 state/sent/<週フォルダ名>.json に宛先・日時・GmailメッセージIDを記録する。
 - 台帳に同じ宛先の記録がある週は送らない。再送は --force-resend を明示したときだけ。
   （2026-09-07 に手動実行と自動実行が同時に動いて二重送信した事故への対策）
+
+テスト送信（--test、2026-11-02〜）:
+- 記録は本番とは別の台帳 state/sent_test/<週>.json に残す。本番の台帳 state/sent/ には書かないので、
+  テスト送信が本番配信の「送信済み」判定に影響しない。
+- 件名の先頭に【テスト送信】を付ける。本番の宛先（PRODUCTION_TO）へはテスト送信できない。
 """
 from __future__ import annotations
 
@@ -24,6 +29,9 @@ from typing import Any
 
 REPORTS_DIR = Path("reports_v2")
 SENT_LEDGER_DIR = Path("state/sent")
+TEST_LEDGER_DIR = Path("state/sent_test")
+TEST_SUBJECT_PREFIX = "【テスト送信】"
+PRODUCTION_TO = "unei@tcd.jp"
 JST = timezone(timedelta(hours=9))
 
 
@@ -100,8 +108,13 @@ def send_html_email(gmail_service: Any, to: str, subject: str, html_content: str
 
 
 def send_report(report_dir: Path, to: str, credentials_file: str = "credentials.json",
-                force_resend: bool = False, ledger_dir: Path = SENT_LEDGER_DIR,
-                gmail_service: Any = None) -> str | None:
+                force_resend: bool = False, ledger_dir: Path | None = None,
+                gmail_service: Any = None, test: bool = False) -> str | None:
+    """test=True: 本番とは別の台帳（TEST_LEDGER_DIR）に記録し、件名に【テスト送信】を付ける。"""
+    if test and to.strip().lower() == PRODUCTION_TO:
+        raise ValueError(f"テスト送信は本番の宛先（{PRODUCTION_TO}）には送らない")
+    if ledger_dir is None:
+        ledger_dir = TEST_LEDGER_DIR if test else SENT_LEDGER_DIR
     html_path = report_dir / "report.html"
     if not html_path.exists():
         raise FileNotFoundError(f"{html_path} が見つかりません。先に src_v2.report.build を実行してください。")
@@ -113,6 +126,8 @@ def send_report(report_dir: Path, to: str, credentials_file: str = "credentials.
 
     html_content = html_path.read_text(encoding="utf-8")
     subject = _subject_for(report_dir)
+    if test:
+        subject = TEST_SUBJECT_PREFIX + subject
 
     if gmail_service is None:
         from src_v2.auth import get_gmail_service
@@ -127,22 +142,26 @@ def main() -> None:
     parser.add_argument("--report-dir", required=True, help="reports_v2/配下のレポートディレクトリ（送る週を明示する）")
     parser.add_argument("--to", required=True, help="送信先メールアドレス")
     parser.add_argument("--force-resend", action="store_true", help="送信済み台帳に記録がある週を再送する")
+    parser.add_argument("--test", action="store_true",
+                        help="テスト送信（本番とは別の台帳 state/sent_test/ に記録し、件名に【テスト送信】を付ける）")
     parser.add_argument("--credentials-file", default="credentials.json")
     args = parser.parse_args()
 
     report_dir = Path(args.report_dir)
+    ledger_dir = TEST_LEDGER_DIR if args.test else SENT_LEDGER_DIR
 
     print(f"入力: {report_dir / 'report.html'}")
     print(f"送信先: {args.to}")
     try:
-        message_id = send_report(report_dir, args.to, args.credentials_file, force_resend=args.force_resend)
+        message_id = send_report(report_dir, args.to, args.credentials_file, force_resend=args.force_resend,
+                                 test=args.test)
     except AlreadySentError as e:
         print(f"送信しません: {e}", file=sys.stderr)
         sys.exit(3)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"エラー: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"送信完了（message_id={message_id}、台帳: {ledger_path(report_dir)}）")
+    print(f"送信完了（message_id={message_id}、台帳: {ledger_path(report_dir, ledger_dir)}）")
 
 
 if __name__ == "__main__":
