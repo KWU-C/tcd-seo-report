@@ -77,7 +77,12 @@ def _ga4_revision(bundle: dict, processed_root: Path) -> dict | None:
     prv_dir = _find_dir_by_report_week(processed_root, period["ga4_prv_start"], period["ga4_prv_end"])
     if prv_dir is None:
         return None
-    previous = _load_bundle(prv_dir).get("ga4") or {}
+    previous_bundle = _load_bundle(prv_dir)
+    revision_period = {"start": period["ga4_prv_start"], "end": period["ga4_prv_end"]}
+    # 集計対象のホスト名が前週と違う（2026-11-16週の切り替えなど）と、差が速報値の遅れを表さないため比べない
+    if previous_bundle.get("period", {}).get("ga4_hostnames", []) != period.get("ga4_hostnames", []):
+        return {"period": revision_period, "segments": {}, "skipped": "hostnames_changed"}
+    previous = previous_bundle.get("ga4") or {}
     result = {}
     for key, seg in (bundle.get("ga4") or {}).items():
         first = (previous.get(key) or {}).get("current")
@@ -88,7 +93,7 @@ def _ga4_revision(bundle: dict, processed_root: Path) -> dict | None:
             "label": seg.get("label", key), "first": first, "refetched": refetched,
             "delta_pct": round((refetched - first) / first * 100, 1) if first else None,
         }
-    return {"period": {"start": period["ga4_prv_start"], "end": period["ga4_prv_end"]}, "segments": result}
+    return {"period": revision_period, "segments": result}
 
 
 def _recent_bundles(processed_root: Path, up_to_cur_end: str, max_periods: int = 4) -> list[tuple[str, dict]]:

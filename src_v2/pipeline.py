@@ -195,6 +195,8 @@ def run(credentials_file: str = "credentials.json", output_root: Path | str = PR
     period["aio_observed_at"] = datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
     aio_records = fetch_aio.fetch_priority_queries(priority_queries)
 
+    # GA4の集計対象ホスト名を期間情報に記録する（前週の速報値と比べるとき、条件が同じかを確かめるため）
+    period["ga4_hostnames"] = list(pipeline_cfg["ga4"].get("hostnames") or [])
     print("GA4サイトアクセス状況取得中...")
     ga4_segments = fetch_ga4.fetch_segments(
         pipeline_cfg["ga4"],

@@ -769,6 +769,8 @@ def _build_periods(period: dict, ga4_revision: dict | None) -> dict:
     if period.get("gsc_shift_days"):
         seo_notes.append(f"Search Consoleのデータ確定が遅れているため、通常より{period['gsc_shift_days']}日前までの期間で集計した。")
     site_notes = ["当週の値は速報値（日曜分はGA4の処理中の可能性がある）。前週の値は今回取り直した値。"]
+    if period.get("ga4_hostnames"):
+        site_notes.append(f"本番サイト（{'・'.join(period['ga4_hostnames'])}）のアクセスのみ。ステージング・バックアップ環境のアクセスは含めない。")
     return {
         "scheme": "weekly",
         "title": f"{period['report_week_start']} 〜 {period['report_week_end']}",
@@ -786,7 +788,10 @@ def _data_quality_extra_lines(periods: dict, inquiries: dict) -> list[str]:
         return []
     lines = [periods["header_note"]]
     revision = periods.get("ga4_revision")
-    if revision and revision.get("segments"):
+    if revision and revision.get("skipped") == "hostnames_changed":
+        lines.append(f"前週GA4（{revision['period']['start']}〜{revision['period']['end']}）の速報値→再取得値: "
+                     "集計対象を本番サイトのみに変えた週のため比べない")
+    elif revision and revision.get("segments"):
         diffs = "、".join(
             f"{seg['label']} {seg['first']:,}→{seg['refetched']:,}"
             + (f"（{seg['delta_pct']:+.1f}%）" if seg.get("delta_pct") is not None else "")
