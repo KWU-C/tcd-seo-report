@@ -19,6 +19,7 @@ from google.analytics.data_v1beta.types import (
     DateRange,
     Filter,
     FilterExpression,
+    FilterExpressionList,
     Metric,
     RunReportRequest,
 )
@@ -31,16 +32,34 @@ def _build_client(credentials_file: str = "credentials.json") -> BetaAnalyticsDa
     return BetaAnalyticsDataClient(credentials=creds)
 
 
+def _hostname_filter(hostnames: list[str] | None) -> FilterExpression | None:
+    """本番ホスト名だけに絞る条件（config_v2/pipeline.yaml の ga4.hostnames）。空・未設定なら絞らない。"""
+    if not hostnames:
+        return None
+    return FilterExpression(filter=Filter(
+        field_name="hostName", in_list_filter=Filter.InListFilter(values=list(hostnames))))
+
+
+def _and_filters(*exprs: FilterExpression | None) -> FilterExpression | None:
+    exprs = [e for e in exprs if e is not None]
+    if not exprs:
+        return None
+    if len(exprs) == 1:
+        return exprs[0]
+    return FilterExpression(and_group=FilterExpressionList(expressions=exprs))
+
+
 def _fetch_active_users(
     client: BetaAnalyticsDataClient,
     property_id: str,
     start_date: str,
     end_date: str,
     path_contains: str | None,
+    hostnames: list[str] | None = None,
 ) -> int:
-    dimension_filter = None
+    path_filter = None
     if path_contains:
-        dimension_filter = FilterExpression(
+        path_filter = FilterExpression(
             filter=Filter(
                 field_name="pagePathPlusQueryString",
                 string_filter=Filter.StringFilter(
@@ -49,6 +68,7 @@ def _fetch_active_users(
                 ),
             )
         )
+    dimension_filter = _and_filters(_hostname_filter(hostnames), path_filter)
     request = RunReportRequest(
         property=f"properties/{property_id}",
         metrics=[Metric(name="activeUsers")],
@@ -76,6 +96,7 @@ def fetch_segments(
     （このセグメントのみ失敗として扱い、他は継続する）。
     """
     property_id = ga4_cfg["property_id"]
+    hostnames = ga4_cfg.get("hostnames")
 
     try:
         client = _build_client(credentials_file)
@@ -89,8 +110,8 @@ def fetch_segments(
     for seg in ga4_cfg["segments"]:
         key = seg["key"]
         try:
-            current = _fetch_active_users(client, property_id, cur_start, cur_end, seg.get("path_contains"))
-            comparison = _fetch_active_users(client, property_id, prv_start, prv_end, seg.get("path_contains"))
+            current = _fetch_active_users(client, property_id, cur_start, cur_end, seg.get("path_contains"), hostnames)
+            comparison = _fetch_active_users(client, property_id, prv_start, prv_end, seg.get("path_contains"), hostnames)
             result[key] = {"label": seg["label"], "current": current, "comparison": comparison, "error": None}
         except Exception as e:  # noqa: BLE001 - セグメント単位で失敗を隔離する
             result[key] = {"label": seg["label"], "current": None, "comparison": None, "error": str(e)}
