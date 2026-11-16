@@ -48,8 +48,21 @@ def _num(v) -> str:
     return "-" if v is None else f"{v:,}"
 
 
+def _summary_md(su: dict) -> list[str]:
+    """① 冒頭のサマリー（HTMLの6カードに対応する表）。"""
+    out = [f"**サマリー（指標: GA4 {su['metric_label']}・人）**\n", "| 項目 | 今週 | 前週比 |", "|---|---:|---:|"]
+    for row in su.get("summary_tiles") or []:
+        for s in row:
+            if s.get("error"):
+                out.append(f"| {s['label']} | 取得失敗 | - |")
+            else:
+                flag = "※異常値を含む" if s.get("anomalies") else _pct_label(s["delta_pct"])
+                out.append(f"| {s['label']} | {_num(s['current'])} | {flag} |")
+    return out + [""]
+
+
 def _site_usage_v2(su: dict) -> str:
-    out = [f"**到達ユーザー（指標: GA4 {su['metric_label']}）**\n",
+    out = _summary_md(su) + [f"**到達ユーザー（指標: GA4 {su['metric_label']}）**\n",
            f"| セグメント | 集計対象（ページ） | 今週（人） | 前週（人） | 前週比 |\n|---|---|---:|---:|---:|"]
     for row in su["rows"]:
         for s in row:

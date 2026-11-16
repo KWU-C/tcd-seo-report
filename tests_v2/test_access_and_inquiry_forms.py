@@ -302,3 +302,33 @@ def test_rule_change_note_and_legacy_diff_are_shown():
     su = view_model._build_access(access, [], "2026-11-13")
     assert "11/16配信分までのレポートの値とは一致しない" in su["rule_notes"][0]
     assert su["rule_notes"][1] == "集計条件の変更による差（今週の値。旧条件の部分一致→新条件）: 資料請求ページ到達（一般） 164→154人。"
+
+
+# ── ① 冒頭のサマリー（6カード） ─────────────────────────────────
+
+def test_summary_tiles_reuse_detail_segments():
+    su = _vm_site_usage()
+    keys = [[s["key"] for s in row] for row in su["summary_tiles"]]
+    assert keys == [["site_wide"], ["contact", "document_request"]]  # テスト用データにある分だけ
+    by_key = {s["key"]: s for s in su["segments"]}
+    for row in su["summary_tiles"]:
+        for s in row:
+            assert s is by_key[s["key"]]  # 同じオブジェクト（集計を重複させない・値が一致する）
+
+
+def test_summary_tiles_render_same_numbers_as_table():
+    from src_v2.report.render_html import _site_usage_v2_html
+    su = _vm_site_usage()
+    html = _site_usage_v2_html(su)
+    head, _, table = html.partition("<h3>到達ユーザー")
+    assert head.count('class="stat-tile"') == 3
+    assert "3,741" in head and "+189.1%" in head and "3,741" in table and "+189.1%" in table
+    assert "※異常値を含む" in head  # 資料請求（一般）は詳細の表と同じく前週比を出さない
+    md = render_markdown_section(su)
+    assert md.index("**サマリー") < md.index("**到達ユーザー")
+    assert "| サイト全体 | 3,741 | +189.1% |" in md
+
+
+def render_markdown_section(su):
+    from src_v2.report.render_md import _site_usage_v2
+    return _site_usage_v2(su)

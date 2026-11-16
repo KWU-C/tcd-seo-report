@@ -106,7 +106,9 @@ def _site_usage_v2_html(su: dict) -> str:
                 continue
             change = ('<span class="muted">※異常値を含む</span>' if s.get("anomalies") else _pct_html(s["delta_pct"]))
             rows.append([escape(s["label"]), escape(s.get("rule_label") or "-"), _n(s["current"]), _n(s["comparison"]), change])
-    html = [f"<h3>到達ユーザー（指標: GA4 {escape(su['metric_label'])}）</h3>",
+    html = [_summary_tiles_html(su),
+            f'<p class="note">カードの数値: GA4 {escape(su["metric_label"])}（人）。前週比は新しい集計条件どうしの比較。詳細は下の表。</p>',
+            f"<h3>到達ユーザー（指標: GA4 {escape(su['metric_label'])}）</h3>",
             _table_html(["セグメント", "集計対象（ページ）", "今週（人）", "前週（人）", "前週比"], rows, num_from=2),
             _notes_html([su["metric_note"], *su.get("rule_notes", []),
                          *(f"異常値（原因未確認）: {a}" for a in su["anomaly_notes"]), *su["extra_notes"]])]
@@ -162,7 +164,14 @@ def _site_usage_html(site_usage: dict) -> str:
     return "".join(rows_html)
 
 
-def _site_tile_html(seg: dict) -> str:
+def _summary_tiles_html(su: dict) -> str:
+    """① 冒頭のサマリー（旧版の6カード形式）。値と前週比は詳細の表と同じセグメントの値。"""
+    rows = su.get("summary_tiles") or []
+    return "".join(f'<div class="stat-row stat-row-4">{"".join(_site_tile_html(seg, thousands=True) for seg in row)}</div>'
+                   for row in rows)
+
+
+def _site_tile_html(seg: dict, thousands: bool = False) -> str:
     if seg.get("error"):
         return f"""
         <div class="stat-tile">
@@ -172,13 +181,17 @@ def _site_tile_html(seg: dict) -> str:
 
     delta_pct = seg.get("delta_pct")
     delta_html = ""
-    if delta_pct is not None:
+    if seg.get("anomalies"):
+        # 詳細の表と同じく、異常値を含むセグメントは前週比を出さない
+        delta_html = '<div class="stat-sub"><span class="muted">※異常値を含む（前週比は評価しない）</span></div>'
+    elif delta_pct is not None:
         state = "good" if delta_pct >= 0 else "critical"
         delta_html = f'<div class="stat-sub">{_status_chip(f"{delta_pct:+.1f}%", state)}（前週比）</div>'
+    value = _n(seg.get("current")) if thousands else _fmt_num(seg.get("current"))
     return f"""
         <div class="stat-tile">
           <div class="stat-label">{escape(seg['label'])}</div>
-          <div class="stat-value-num">{_fmt_num(seg.get("current"))}</div>
+          <div class="stat-value-num">{value}</div>
           {delta_html}
         </div>"""
 

@@ -214,6 +214,16 @@ def _legacy_note(legacy: dict | None, segments: list[dict]) -> str | None:
     return "集計条件の変更による差（今週の値。旧条件の部分一致→新条件）: " + "、".join(parts) + "。"
 
 
+# ① 冒頭のサマリー（旧版と同じ6カード。1段目4枚・2段目2枚）。値は詳細の表と同じセグメント（新しい集計条件）を参照する
+SUMMARY_TILE_ROWS = (("site_wide", "magazine", "works", "service"), ("contact", "document_request"))
+
+
+def _summary_tiles(segments: list[dict]) -> list[list[dict]]:
+    by_key = {s["key"]: s for s in segments}
+    rows = [[by_key[k] for k in row if k in by_key] for row in SUMMARY_TILE_ROWS]
+    return [r for r in rows if r]
+
+
 def _build_access(access: dict, notes_cfg: list[dict], cur_end: str) -> dict:
     """現行方式の①（2026-11-23週〜）。"""
     segments = access["segments"]
@@ -225,6 +235,7 @@ def _build_access(access: dict, notes_cfg: list[dict], cur_end: str) -> dict:
         "metric_label": METRIC_USERS_LABEL,
         "segments": segments,
         "rows": [r for r in rows if r],
+        "summary_tiles": _summary_tiles(segments),
         "anomaly_notes": anomaly_notes,
         "metric_note": SITE_USAGE_METRIC_NOTE,
         "rule_notes": [n for n in (RULE_CHANGE_NOTE, _legacy_note(access.get("legacy_comparison"), segments)) if n],
