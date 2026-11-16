@@ -13,7 +13,10 @@ EXPECTED_CTR_BY_POSITION: dict[int, float] = {
 }
 
 VALID_SEVERITIES = {"critical", "warning", "info"}
-VALID_JUDGMENTS = {"実施", "継続観測", "効果確認待ち", "再調査", "判断保留", "表示なし", "参考"}
+# 施策の効果確認（2026-11-23配信分〜）の判定は src_v2/analysis/initiatives.py の ALL_VERDICTS
+VALID_JUDGMENTS = {"実施", "継続観測", "効果確認待ち", "再調査", "判断保留", "表示なし", "参考",
+                   "評価不能", "評価対象未設定", "検索流入の前後比較の対象外", "数値の変化のみ",
+                   "比較対照と異なる増加（原因未確定）", "比較対照と異なる減少（原因未確定）", "指標で方向が異なる（原因未確定）"}
 
 # 「判断保留」「再調査」「表示なし」で、判断のために何が不足しているか（レポートに「判断｜不足：X」で表示）
 SHORTFALL_SAMPLE = "サンプル数"

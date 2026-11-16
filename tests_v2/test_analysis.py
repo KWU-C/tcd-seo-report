@@ -10,7 +10,7 @@ THRESHOLDS = {
         "low_impressions": 50, "low_clicks": 5,
         "position_change_meaningful": 2.0, "minimum_weeks_for_trend": 3,
     },
-    "initiative_review": {"day14_after_implementation": 14, "day28_after_implementation": 28},
+    "initiative_review": {"max_window_days": 28, "min_post_days": 14, "significance_t": 2.0},
     "market": {"weeks_per_month": 4.3, "min_impressions_ratio": 0.5},
     "display": {"position_delta_flat": 1.0, "position_delta_minor": 3.0},
 }
@@ -281,43 +281,6 @@ def test_parse_initiatives_md(tmp_path):
     assert result[0]["name"] == "テスト施策"
     assert result[0]["implemented_at"] == "unknown"
     assert result[0]["target_url"] == "https://tcd.jp/branding/03-news/osaka-branding-company.html"
-
-
-def test_analyze_initiatives_unknown_date_is_hold(tmp_path):
-    md = tmp_path / "current-initiatives.md"
-    md.write_text("## 施策A\n\n- 対象: x\n- 状態: 実装済み\n- 実装日: unknown\n- 評価予定日: 未設定\n", encoding="utf-8")
-    bundle = {"period": {"cur_end": "2026-07-26"}, "gsc": {"current": {"gsc_page_daily": []}, "comparison": {"gsc_page_daily": []}}}
-    findings = initiatives.analyze_initiatives(md, bundle, [], THRESHOLDS)
-    assert findings[0]["judgment"] == "判断保留"
-    assert findings[0]["confidence"] == "Not assessable"
-
-
-def test_analyze_initiatives_before_day14_is_awaiting(tmp_path):
-    md = tmp_path / "current-initiatives.md"
-    md.write_text("## 施策B\n\n- 対象: x\n- 状態: 実装済み\n- 実装日: 2026-07-20\n- 評価予定日: 未設定\n", encoding="utf-8")
-    bundle = {"period": {"cur_end": "2026-07-26"}, "gsc": {"current": {"gsc_page_daily": []}, "comparison": {"gsc_page_daily": []}}}
-    findings = initiatives.analyze_initiatives(md, bundle, [], THRESHOLDS)
-    assert findings[0]["judgment"] == "効果確認待ち"
-
-
-def test_analyze_initiatives_after_day28_negative_signal_is_reinvestigate(tmp_path):
-    md = tmp_path / "current-initiatives.md"
-    md.write_text(
-        "## 施策C\n\n- 対象URL: https://tcd.jp/branding/03-news/osaka-branding-company.html\n"
-        "- 状態: 実装済み\n- 実装日: 2026-05-01\n- 評価予定日: 未設定\n",
-        encoding="utf-8",
-    )
-    pages_cfg = [{"id": "branding-osaka-branding-company", "url": "https://tcd.jp/branding/03-news/osaka-branding-company.html"}]
-    bundle = {
-        "period": {"cur_end": "2026-07-26"},
-        "gsc": {
-            "current": {"gsc_page_daily": [{"page_id": "branding-osaka-branding-company", "clicks": 1, "impressions": 30, "ctr": 0.03, "position": 12.0}]},
-            "comparison": {"gsc_page_daily": [{"page_id": "branding-osaka-branding-company", "clicks": 5, "impressions": 80, "ctr": 0.06, "position": 9.0}]},
-        },
-    }
-    findings = initiatives.analyze_initiatives(md, bundle, pages_cfg, THRESHOLDS)
-    assert findings[0]["judgment"] == "再調査"
-    assert findings[0]["severity"] == "warning"
 
 
 # ── landing_pages.py ─────────────────────────────────────────────

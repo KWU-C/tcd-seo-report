@@ -40,7 +40,89 @@ def _highlights_section(es: dict) -> str:
 
 # ── ① サイト全体のアクセス状況（GA4） ─────────────────────────────────────
 
+def _pct_label(v: float | None) -> str:
+    return "-" if v is None else f"{v:+.1f}%"
+
+
+def _num(v) -> str:
+    return "-" if v is None else f"{v:,}"
+
+
+def _summary_md(su: dict) -> list[str]:
+    """① 冒頭のサマリー（HTMLの6カードに対応する表）。"""
+    out = [f"**サマリー（指標: GA4 {su['metric_label']}・人）**\n", "| 項目 | 今週 | 前週比 |", "|---|---:|---:|"]
+    for row in su.get("summary_tiles") or []:
+        for s in row:
+            if s.get("error"):
+                out.append(f"| {s['label']} | 取得失敗 | - |")
+            else:
+                flag = "※異常値を含む" if s.get("anomalies") else _pct_label(s["delta_pct"])
+                out.append(f"| {s['label']} | {_num(s['current'])} | {flag} |")
+    return out + [""]
+
+
+def _site_usage_v2(su: dict) -> str:
+    out = [f"**到達ユーザー（指標: GA4 {su['metric_label']}）**\n",
+           f"| セグメント | 集計対象（ページ） | 今週（人） | 前週（人） | 前週比 |\n|---|---|---:|---:|---:|"]
+    for row in su["rows"]:
+        for s in row:
+            if s.get("error"):
+                out.append(f"| {s['label']} | {s.get('rule_label') or '-'} | 取得失敗 | - | - |")
+                continue
+            flag = "※異常値を含む" if s.get("anomalies") else _pct_label(s["delta_pct"])
+            out.append(f"| {s['label']} | {s.get('rule_label') or '-'} | {_num(s['current'])} | {_num(s['comparison'])} | {flag} |")
+    out.append("")
+    out += [f"- {n}" for n in [su["metric_note"], *su.get("rule_notes", []),
+                                *(f"異常値（原因未確認）: {a}" for a in su["anomaly_notes"]), *su["extra_notes"]]]
+
+    ch = su.get("channels")
+    if ch:
+        out.append(f"\n**流入元別（指標: GA4 {'セッション数'}）**\n")
+        if ch["status"] != "ok":
+            out.append(f"取得失敗（{ch.get('error') or '-'}）")
+        else:
+            out.append("| 流入元 | 今週（セッション） | 前週（セッション） | 前週比 | 構成比 | エンゲージメント率 |\n|---|---:|---:|---:|---:|---:|")
+            for r in ch["rows"]:
+                share = "-" if r["share_pct"] is None else f"{r['share_pct']:.1f}%"
+                eng = "-" if r["engagement_rate"] is None else f"{r['engagement_rate']:.1f}%"
+                out.append(f"| {r['label']} | {r['current']:,} | {r['comparison']:,} | {_pct_label(r['delta_pct'])} | {share} | {eng} |")
+            tot = ch["total"]
+            out.append(f"| 合計（サイト全体） | {tot['current']:,} | {tot['comparison']:,} | {_pct_label(tot['delta_pct'])} | 100.0% | - |")
+            out.append("")
+            out.append(f"- {su['channel_note']}")
+            if ch.get("ai_services"):
+                out.append("- 生成AIの内訳（今週／前週）: " + "、".join(
+                    f"{s['service']} {s['current']}／{s['comparison']}" for s in ch["ai_services"]))
+    tr = su.get("trend")
+    if tr:
+        out.append("\n**推移（直近8週・月〜日）**\n")
+        if tr["status"] != "ok":
+            out.append(f"取得失敗（{tr.get('error') or '-'}）")
+        else:
+            out.append("| 週 | ユーザー 全体（人） | ユーザー 広告を除く（人） | セッション 全体 | うち広告 | セッション 広告を除く |")
+            out.append("|---|---:|---:|---:|---:|---:|")
+            for r in tr["rows"]:
+                out.append(f"| {r['week_label']} | {r['users_total']:,} | {r['users_non_ad']:,} | {r['sessions_total']:,} "
+                           f"| {r['sessions_ad']:,} | {r['sessions_non_ad']:,} |")
+            out.append("")
+            out.append(f"- {su['trend_note']}")
+    st = su.get("segment_trend")
+    if st and st["rows"]:
+        out.append(f"\n**セグメント別の推移（指標: GA4 {su['metric_label']}・直近8週・新しい集計条件で再集計）**\n")
+        out.append("| セグメント（人） | " + " | ".join(st["week_labels"]) + " |")
+        out.append("|---|" + "---:|" * len(st["week_labels"]))
+        for r in st["rows"]:
+            cells = ["取得失敗"] * len(st["week_labels"]) if r["error"] else [_num(v) for v in r["values"]]
+            out.append(f"| {r['label']} | " + " | ".join(cells) + " |")
+        out.append("")
+        out.append("- 各週（月〜日）にそのページを1回以上表示したユーザー数。最新週は速報値。")
+    return "\n".join(out) + "\n"
+
+
 def _site_usage_section(site_usage: dict) -> str:
+    if site_usage.get("scheme") == "v2":
+        # 現行方式の①はサマリーだけ。詳細は render_markdown が「アクセスの詳細」として別の見出しで出す
+        return "\n".join(_summary_md(site_usage)) + "\n"
     segments = site_usage.get("segments") or []
     if not segments:
         return "GA4データなし\n"
@@ -74,7 +156,18 @@ def _inquiries_section(inq: dict) -> str:
         f"| {row['label']} | {_count_label(row['current'], missing)} | {inquiry_cumulative_label(cum4, row['cumulative_4w'])} |"
         for row in inq["rows"]
     ]
-    return header + "\n".join(rows) + "\n\n" + "\n".join(f"- {n}" for n in inq["notes"]) + "\n"
+    rate = inq.get("rate")
+    if rate:
+        rows.insert(2, f"| {rate['label']} | {rate['current_label'] or missing} | {rate['cumulative_4w_label']} |")
+    forms = ""
+    if inq.get("forms") and inq["forms"].get("state"):
+        f = inq["forms"]
+        if f["state"] == "ok":
+            forms = ("\nフォーム区分（当週）\n\n| 項目 | 一般 | BtoB | 不明 |\n|---|---:|---:|---:|\n"
+                     + "\n".join(f"| {r['label']} | {r['general']} | {r['b2b']} | {r['unknown']} |" for r in f["rows"]) + "\n")
+        else:
+            forms = f"\nフォーム区分（当週）: {f['label']}\n"
+    return header + "\n".join(rows) + "\n" + forms + "\n" + "\n".join(f"- {n}" for n in inq["notes"]) + "\n"
 
 
 # ── ④ SEO検索順位 ───────────────────────────────────────────────
@@ -203,6 +296,50 @@ def _initiative_row(f: dict, show_confidence: bool = False) -> str:
     return f"- **{status_str}** {f['display_message'] or '-'}\n  - 推奨: {f['recommendation']}"
 
 
+def _initiative_v2(item: dict) -> str:
+    metric = f"（主指標: {item['primary_metric_label']}）" if item["primary_metric_label"] else "（評価方法: 正規化・インデックス確認）"
+    lines = [f"#### {item['name']}\n", f"**判定: {item['verdict']}**{metric}\n"]
+    if item["elapsed_label"]:
+        lines.append(f"- 経過日数: {item['elapsed_label']}")
+    elif item.get("implemented_at"):
+        lines.append(f"- 実装日: {item['implemented_at']}")
+    if item["period_label"]:
+        lines.append(f"- 比較期間: {item['period_label']}")
+    if item["urls"]:
+        lines.append(f"- 対象ページ: {len(item['urls'])}件" + (f"（{item['urls'][0]}）" if len(item["urls"]) == 1 else ""))
+    if item["hypothesis"]:
+        lines.append(f"- 仮説: {item['hypothesis']}")
+    if item["metrics_rows"]:
+        lines.append("\n数値の変化（対象ページ）と、同じ期間の比較対照（対象ページ以外）の変化\n")
+        lines.append("| 指標 | 実装前 | 実装後 | 変化 | 比較対照の変化 |\n|---|---:|---:|---:|---:|")
+        lines += [f"| {r['label']} | {r['pre']} | {r['post']} | {r['change']} | {r['control_change']} |" for r in item["metrics_rows"]]
+        lines.append("")
+    q = item.get("queries")
+    if q:
+        lines.append(f"- 検索クエリの構成: {q['counts_label']}。実装後の表示回数のうち、実装前にも表示されていたクエリの割合 {q['shared_label']}")
+        if q["top"]:
+            lines.append(f"  - 実装後の上位: {'、'.join(q['top'])}")
+        if q["increased"]:
+            lines.append(f"  - 増えたクエリ: {'、'.join(q['increased'])}")
+        if q["decreased"]:
+            lines.append(f"  - 減ったクエリ: {'、'.join(q['decreased'])}")
+    lines += [f"- 判定の理由: {r}" for r in item["reasons"]] or ["- 判定の理由: -"]
+    lines.append(f"- 対応: {item['recommendation']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _initiatives_section(appendix: dict) -> str:
+    ini = appendix.get("initiatives") or {"scheme": "legacy", "items": appendix["unknown_initiatives"], "notes": []}
+    if ini["scheme"] != "v2":
+        body = ("\n".join(_initiative_row(f, show_confidence=True) for f in ini["items"]) + "\n") if ini["items"] else "なし\n"
+        return "\n### 実装日未登録の施策\n\n" + body
+    parts = ["\n### 施策の効果確認（実装前後の比較）\n"]
+    parts.append("\n".join(f"- {n}" for n in ini["notes"]) + "\n")
+    parts += [_initiative_v2(item) for item in ini["items"]] or ["なし\n"]
+    return "\n".join(parts)
+
+
 # ── Appendix ────────────────────────────────────────────────────
 
 def _appendix_landing_pages(landing_pages: dict) -> str:
@@ -253,11 +390,7 @@ def _appendix_section(appendix: dict, pm: dict, low_impressions_threshold: int) 
     parts.append(f"\n### 少数データ・要確認以外のページ（{len(appendix['other_pages'])}件、※ Impressions {low_impressions_threshold}未満は参考値）\n")
     parts.append(_pages_table(appendix["other_pages"], show_confidence=True))
 
-    parts.append("\n### 実装日未登録の施策\n")
-    if appendix["unknown_initiatives"]:
-        parts.append("\n".join(_initiative_row(f, show_confidence=True) for f in appendix["unknown_initiatives"]) + "\n")
-    else:
-        parts.append("なし\n")
+    parts.append(_initiatives_section(appendix))
 
     parts.append("\n### 上位ランディングページ（/branding/、定点観測対象外）\n")
     parts.append(_appendix_landing_pages(appendix["landing_pages"]))
@@ -282,6 +415,9 @@ def render_markdown(vm: dict) -> str:
 
     parts.append(f"## ① サイト全体のアクセス状況{sec['site_usage']}\n")
     parts.append(_site_usage_section(vm["site_usage"]))
+    if vm["site_usage"].get("scheme") == "v2":
+        parts.append(f"## アクセスの詳細{sec['site_usage']}\n")
+        parts.append(_site_usage_v2(vm["site_usage"]))
     if notes["site_usage"]:
         parts.append("\n".join(f"- {n}" for n in notes["site_usage"]) + "\n")
 

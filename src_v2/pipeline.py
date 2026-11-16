@@ -25,13 +25,14 @@ try:
 except ImportError:
     pass
 
-from src_v2 import config_loader, fetch_aio, fetch_ga4, fetch_gsc, fetch_inquiries, normalize, validate
+from src_v2 import config_loader, fetch_aio, fetch_ga4, fetch_gsc, fetch_initiatives, fetch_inquiries, normalize, validate
 from googleapiclient.errors import HttpError
 
 from src_v2.auth import get_search_console_service
 from src_v2.schema import SCHEMA_VERSION, DataQualityError, GscFetchError
 
 PROCESSED_DIR = Path("data_v2/processed")
+INITIATIVES_MD = Path("docs/current-initiatives.md")
 SITE_URL = "https://tcd.jp/"
 
 
@@ -198,15 +199,21 @@ def run(credentials_file: str = "credentials.json", output_root: Path | str = PR
     # GA4の集計対象ホスト名を期間情報に記録する（前週の速報値と比べるとき、条件が同じかを確かめるため）
     period["ga4_hostnames"] = list(pipeline_cfg["ga4"].get("hostnames") or [])
     print("GA4サイトアクセス状況取得中...")
-    ga4_segments = fetch_ga4.fetch_segments(
-        pipeline_cfg["ga4"],
-        period["report_week_start"], period["report_week_end"],
-        period["ga4_prv_start"], period["ga4_prv_end"],
-        credentials_file=credentials_file,
-    )
+    ga4_segments, ga4_access = fetch_ga4.fetch_access(pipeline_cfg["ga4"], period, credentials_file=credentials_file)
     for key, seg in ga4_segments.items():
         if seg["error"]:
             print(f"  警告: GA4セグメント'{key}'の取得に失敗（参考情報のため処理は継続）: {seg['error']}")
+    for key in ("channels", "trend"):
+        if ga4_access[key]["status"] != "ok":
+            print(f"  警告: GA4の{key}の取得に失敗（参考情報のため処理は継続）: {ga4_access[key]['error']}")
+
+    print("施策の実装前後の比較データ（Search Console）取得中...")
+    review_cfg = config_loader.load_thresholds()["initiative_review"]
+    initiatives_gsc = fetch_initiatives.fetch_for_period(
+        service, period, INITIATIVES_MD, pages, review_cfg["max_window_days"])
+    failed = [n for n, i in initiatives_gsc["items"].items() if i["status"] == "failed"]
+    if failed or initiatives_gsc.get("site_error"):
+        print(f"  警告: 施策の比較データの一部を取得できない（参考情報のため処理は継続）: {failed} {initiatives_gsc.get('site_error') or ''}")
 
     print("問い合わせ集計（スプレッドシート）取得中...")
     inquiries_snapshot = fetch_inquiries.fetch_snapshot(pipeline_cfg.get("inquiries"), credentials_file)
@@ -242,6 +249,8 @@ def run(credentials_file: str = "credentials.json", output_root: Path | str = PR
         "gsc": {"current": gsc_current_tables, "comparison": gsc_comparison_tables},
         "aio_observations": aio_table,
         "ga4": ga4_segments,
+        "ga4_access": ga4_access,
+        "initiatives_gsc": initiatives_gsc,
         "inquiries_snapshot": inquiries_snapshot,
     }
 

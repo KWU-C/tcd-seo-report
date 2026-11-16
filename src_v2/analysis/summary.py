@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src_v2 import config_loader
+from src_v2.analysis.access import build_access_summary
 from src_v2.analysis.initiatives import analyze_initiatives
 from src_v2.analysis.landing_pages import analyze_landing_pages
 from src_v2.analysis.market import analyze_market
@@ -85,7 +86,11 @@ def _ga4_revision(bundle: dict, processed_root: Path) -> dict | None:
     previous = previous_bundle.get("ga4") or {}
     result = {}
     for key, seg in (bundle.get("ga4") or {}).items():
-        first = (previous.get(key) or {}).get("current")
+        prev_seg = previous.get(key) or {}
+        # 集計条件（ページの一致方法）が前週と違うセグメントは比べない（2026-11-23週の切り替えなど）
+        if prev_seg.get("rule") != seg.get("rule"):
+            continue
+        first = prev_seg.get("current")
         refetched = seg.get("comparison")
         if first is None or refetched is None:
             continue
@@ -93,6 +98,8 @@ def _ga4_revision(bundle: dict, processed_root: Path) -> dict | None:
             "label": seg.get("label", key), "first": first, "refetched": refetched,
             "delta_pct": round((refetched - first) / first * 100, 1) if first else None,
         }
+    if not result and any(seg.get("rule") for seg in (bundle.get("ga4") or {}).values()):
+        return {"period": revision_period, "segments": {}, "skipped": "rules_changed"}
     return {"period": revision_period, "segments": result}
 
 
@@ -210,6 +217,7 @@ def run_analysis(
         "data_summary": _data_summary(bundle, excluded_cfg),
         "weeks_available": weeks_available,
         "ga4_summary": bundle.get("ga4", {}),
+        "access": build_access_summary(bundle, thresholds_cfg),
         "ga4_revision": _ga4_revision(bundle, processed_root),
         "inquiries_snapshot": bundle.get("inquiries_snapshot"),
         "findings": findings,

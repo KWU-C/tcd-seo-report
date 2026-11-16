@@ -24,7 +24,8 @@
 #                                                state/sent/ と data_v2/・reports_v2/ は変更しない（本番配信がスキップされない）
 set -uo pipefail
 
-PROJECT_DIR="/Users/kwu/Documents/tcd-seo-report"
+# 確認用に別の作業フォルダ（git worktree）から動かすときだけ TCD_PROJECT_DIR で変える（launchd は既定のまま）
+PROJECT_DIR="${TCD_PROJECT_DIR:-/Users/kwu/Documents/tcd-seo-report}"
 PYTHON="$PROJECT_DIR/.venv/bin/python"
 TO_EMAIL="unei@tcd.jp"
 NOTIFY_EMAIL="kawauchi@tcd.jp"
@@ -151,6 +152,10 @@ fi
 if [ "$REFETCH" -eq 0 ] && [ -f "$PROCESSED_ROOT/$FOLDER/normalized.json" ]; then
   # 再試行時に SerpAPI を重ねて呼ばない（取得は成功し、生成・送信で失敗した場合）
   log "[1/4] 取得済みのデータを使う（$PROCESSED_ROOT/$FOLDER/normalized.json。取り直す場合は --refetch）"
+  # 取得済みのデータに、後から追加した集計（GA4 の流入元・推移、施策の実装前後の比較）が無ければ追記する。
+  # GSC・AIO（SerpAPI）は取り直さない。参考情報のため、失敗しても生成は続ける（レポートに「取得失敗」と出る）。
+  "$PYTHON" -m src_v2.fetch_ga4 --period-dir "$PROCESSED_ROOT/$FOLDER" || log "GA4の追記に失敗（継続）"
+  "$PYTHON" -m src_v2.fetch_initiatives --period-dir "$PROCESSED_ROOT/$FOLDER" || log "施策の比較データの追記に失敗（継続）"
 else
   log "[1/4] pipeline: GSC・AIO・GA4・問い合わせ集計の取得・検証・正規化"
   "$PYTHON" -m src_v2.pipeline --week "$WEEK" --output-root "$PROCESSED_ROOT" || fail "データ取得・検証"

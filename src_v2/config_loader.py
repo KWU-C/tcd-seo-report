@@ -94,6 +94,62 @@ INQUIRY_COUNT_KEYS = (
 )
 _INQUIRY_BREAKDOWN_KEYS = ("project_consultation", "sales_solicitation", "other")
 
+# フォーム区分（2026-11-23週〜、任意）。一般問い合わせ（general_total）と案件相談（project_consultation）を、
+# 送信されたフォームで 一般（/contact）／BtoB（/b2b/contact）／不明 に分ける。既存の件数は変えず、内訳として記録する。
+# 6列すべて空なら「未記録」。1つでも書いた場合は6列とも0以上の整数で、合計が既存の件数と一致すること。
+# 不整合でも既存の件数（②の表）は使い、フォーム区分だけを「不整合」と表示する。
+INQUIRY_FORM_KEYS = {
+    "general_total": ("form_general", "form_b2b", "form_unknown"),
+    "project_consultation": ("consultation_form_general", "consultation_form_b2b", "consultation_form_unknown"),
+}
+FORM_NOT_RECORDED = "not_recorded"
+FORM_OK = "ok"
+FORM_INVALID = "invalid"
+
+
+def _form_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def parse_form_breakdown(raw: dict, counts: dict) -> dict:
+    """フォーム区分の検査。counts は既存の件数（general_total・project_consultation）。
+
+    戻り値: {"state": not_recorded|ok|invalid, "errors": [...], "general_total": {...}, "project_consultation": {...}}
+    """
+    keys = [k for group in INQUIRY_FORM_KEYS.values() for k in group]
+    if all(_blank(raw.get(k)) for k in keys):
+        return {"state": FORM_NOT_RECORDED, "errors": []}
+    errors, values = [], {}
+    for k in keys:
+        v = _form_int(raw.get(k))
+        if v is None or v < 0:
+            errors.append(f"{k} は0以上の整数（フォーム区分を書く週は6列とも入力する）: {raw.get(k)!r}")
+        else:
+            values[k] = v
+    result = {}
+    if not errors:
+        for total_key, group in INQUIRY_FORM_KEYS.items():
+            s = sum(values[k] for k in group)
+            if counts.get(total_key) is not None and s != counts[total_key]:
+                errors.append(f"{'・'.join(group)} の合計 {s} が {total_key} {counts[total_key]} と一致しない")
+            result[total_key] = {"general": values[group[0]], "b2b": values[group[1]], "unknown": values[group[2]]}
+    if errors:
+        return {"state": FORM_INVALID, "errors": errors}
+    return {"state": FORM_OK, "errors": [], **result}
+
+
 # 集計方式（2026-11-02〜）。weekly_mon_sun: 月〜日（現行）。legacy_sun_sat: 2026-10-30以前の旧方式の週
 # （レポートの対象期間に合わせた日〜土など）。値は保持するが、現行方式の4週・12週累計には入れない。
 INQUIRY_SCHEME_WEEKLY = "weekly_mon_sun"
@@ -141,7 +197,10 @@ def load_inquiries(path: Path | str = CONFIG_DIR / "inquiries.yaml") -> list[dic
             raise InquiriesConfigError(f"inquiries.yaml: {label}（{start}〜{end}）の scheme が不正: {scheme!r}")
         if scheme == INQUIRY_SCHEME_WEEKLY and start.weekday() != 0:
             raise InquiriesConfigError(f"inquiries.yaml: {label}（{start}〜{end}）は {scheme} だが月曜始まりではない")
-        parsed.append({**w, "start": start.isoformat(), "end": end.isoformat(), "scheme": scheme})
+        forms = parse_form_breakdown(w, w)
+        if forms["state"] == FORM_INVALID:
+            raise InquiriesConfigError(f"inquiries.yaml: {label}（{start}〜{end}）のフォーム区分: {'／'.join(forms['errors'])}")
+        parsed.append({**w, "start": start.isoformat(), "end": end.isoformat(), "scheme": scheme, "forms": forms})
 
     ordered = sorted(parsed, key=lambda w: w["start"])
     # 期間の重複は同じ集計方式どうしで検査する（旧方式の日〜土と現行の月〜日は1日ずつ重なるが、別の系列として扱う）
