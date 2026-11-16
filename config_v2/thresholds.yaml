@@ -31,11 +31,22 @@ confidence:
     - SEOとAIOの一致（両方が同じ方向を示しているか）
     - ページ単位とクエリ単位の一致
 
-# 施策評価タイミング（docs/current-initiatives.mdの実装日起点）
-# 実装日が unknown の施策は、day14/day28いずれの評価対象にも含めない。
+# 施策の効果確認（docs/current-initiatives.md の実装日起点、2026-11-23週〜）
+# 実装前と実装後の同じ日数（最大 max_window_days 日。実装日当日は除く）を比べる。
+# ここにある値は「評価できるか」と「偶然の変動か」を決めるためのもので、成功・失敗の線ではない。
 initiative_review:
-  day14_after_implementation: 14
-  day28_after_implementation: 28
+  max_window_days: 28     # 比較期間の最大日数（実装後が長くなったら直近28日と、実装前28日を比べる）
+  min_post_days: 14       # 実装後のデータがこれ未満の間は比べない（「効果確認待ち」）
+  # 対象ページの変化と、同じ期間の対象ページ以外の変化との差を、日々の変動（標準誤差）で割った値。
+  # 絶対値がこれ以上なら「日々の変動では説明しにくい」（≒有意水準5%）。
+  significance_t: 2.0
+
+# ① 異常値の検出（2026-11-23週〜）。セグメントの週の値が特定の1日に集中している場合、原因を断定せず
+# 「異常値（原因未確認）」と表示し、増減の要約（③ 今週の要点）に使わない。
+access_anomaly:
+  min_week_users: 30          # 週の到達ユーザーがこれ未満のセグメントは検出しない（少数データ）
+  min_day_share: 0.5          # 1日の値が、日別の合計に占める割合がこれ以上
+  min_ratio_to_median: 3.0    # かつ、その日以外の日の中央値のこれ倍以上
 
 # AIOアラート閾値（config/aio_monitor.yml report.aio_min_impressions / aio_alert_threshold を継承）
 aio:
@@ -52,4 +63,5 @@ display:
   position_delta_flat: 1.0    # これ未満の変化幅は「横ばい」表示（矢印なし）
   position_delta_minor: 3.0   # これ未満は「軽微な変化」、これ以上は「改善／悪化」表示
   access_change_pct: 5.0      # ②今週の要点: 到達ユーザー数の前週比がこの%以上で「増加／減少」と書く
+  access_min_users: 30        # 今週・前週とも到達ユーザーがこれ未満のセグメントは、要約で増減を書かない（表には出す）
 

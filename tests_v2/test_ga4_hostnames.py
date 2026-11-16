@@ -15,9 +15,7 @@ class _Client:
 
     def run_report(self, request):
         self.requests.append(request)
-        return SimpleNamespace(rows=[SimpleNamespace(metric_values=[SimpleNamespace(value="10")])],
-                               dimension_headers=[SimpleNamespace(name="sessionSourceMedium"), SimpleNamespace(name="dateRange")],
-                               row_count=0)
+        return SimpleNamespace(rows=[], dimension_headers=[], row_count=0)
 
 
 def _host_values(expr):
@@ -30,25 +28,30 @@ def _host_values(expr):
     return None
 
 
-def test_active_users_filters_hostname_and_path():
+SEG_CONTACT = {"key": "contact", "label": "問い合わせ", "exact": ["/contact"]}
+
+
+def test_segment_filters_hostname_and_exact_path():
     c = _Client()
-    fetch_ga4._fetch_active_users(c, "1", "2026-11-09", "2026-11-15", "/contact", HOSTS)
+    fetch_ga4._fetch_segment(c, "1", SEG_CONTACT, HOSTS, ("2026-11-09", "2026-11-15"), ("2026-11-02", "2026-11-08"))
     f = c.requests[0].dimension_filter
     assert _host_values(f) == HOSTS
-    assert any(e.filter.field_name == "pagePathPlusQueryString" for e in f.and_group.expressions)
+    path = [e for e in f.and_group.expressions if e.filter.field_name == "pagePath"]
+    assert list(path[0].filter.in_list_filter.values) == ["/contact"]
 
 
-def test_active_users_site_wide_uses_hostname_only():
+def test_segment_site_wide_uses_hostname_only():
     c = _Client()
-    fetch_ga4._fetch_active_users(c, "1", "2026-11-09", "2026-11-15", None, HOSTS)
+    fetch_ga4._fetch_segment(c, "1", {"key": "site_wide", "label": "サイト全体"}, HOSTS,
+                             ("2026-11-09", "2026-11-15"), ("2026-11-02", "2026-11-08"))
     assert _host_values(c.requests[0].dimension_filter) == HOSTS
 
 
 def test_no_hostnames_means_no_filter():
     c = _Client()
-    fetch_ga4._fetch_active_users(c, "1", "2026-11-09", "2026-11-15", None, [])
+    fetch_ga4._fetch_segment(c, "1", {"key": "site_wide", "label": "サイト全体"}, [],
+                             ("2026-11-09", "2026-11-15"), ("2026-11-02", "2026-11-08"))
     assert not c.requests[0].dimension_filter  # 変更前と同じ（絞らない）
-
 
 
 def _write(root, folder, period, ga4):

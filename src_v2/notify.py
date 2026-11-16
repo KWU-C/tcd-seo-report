@@ -49,6 +49,10 @@ def collect_review_items(report_dir: Path) -> list[str]:
         if row.get("citation_unavailable"):
             items.append(f"AIO: {row.get('short_label') or row.get('label')} は本文を取得できず判定不可")
 
+    items += [f"GA4 異常値（原因未確認）: {n}" for n in (report.get("site_usage") or {}).get("anomaly_notes", [])]
+    for item in ((report.get("appendix") or {}).get("initiatives") or {}).get("items", []):
+        if item.get("verdict") == "逆方向の変化の可能性":
+            items.append(f"施策の効果確認: 「{item.get('name')}」が逆方向の変化の可能性（Appendix）")
     for seg in (report.get("site_usage") or {}).get("segments", []):
         if seg.get("error"):
             items.append(f"GA4: {seg.get('label')} の取得に失敗（{seg['error'][:120]}）")

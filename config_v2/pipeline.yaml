@@ -25,25 +25,94 @@ ga4:
   # アクセスが同じプロパティに入っているため（2026-09-14〜11-08 で約200セッション・全体の約1.7%）。
   # 空にすると絞らない（変更前と同じ）。
   hostnames: ["tcd.jp", "www.tcd.jp"]
+  # ① の到達ユーザー（GA4 の activeUsers）。期間中にその条件に合うページを1回以上表示したユーザー数。
+  # 複数セグメントにまたがって数えるため、合計してもサイト全体と一致しない。
+  #
+  # 条件（2026-11-23週〜）: GA4 の pagePath（クエリ文字列を含まない）を、exact（完全一致）か prefix（前方一致）で判定する。
+  # 2026-11-16週までは pagePathPlusQueryString の部分一致（path_contains）だったため、次の混入・欠落があった
+  # （2026-08-01〜11-15 の実データで確認）:
+  #   - 「/service/」: /service（トップ。期間中3,639人）を含まず、/works/service/* を含んでいた
+  #   - 「/works/」: /works（トップ。1,287人）を含まなかった
+  #   - 「/contact」: /b2b/contact と、確認・完了画面（/contact_confirm・/contact_end）を含んでいた
+  #   - 「/download」: /b2b/download と /branding/03-news/download.html（記事）を含んでいた
+  # 部分一致（path_contains）は旧データの再現用に読み込めるが、新しいセグメントには使わない。
   segments:
     - key: site_wide
       label: サイト全体
-      path_contains: null
+      rule_label: すべてのページ
     - key: magazine
       label: マガジン到達
-      path_contains: "/branding/"
+      rule_label: /branding と /branding/ 以下
+      exact: ["/branding"]
+      prefix: ["/branding/"]
     - key: works
       label: Works到達
-      path_contains: "/works/"
+      rule_label: /works と /works/ 以下
+      exact: ["/works"]
+      prefix: ["/works/"]
     - key: service
       label: Service到達
-      path_contains: "/service/"
+      rule_label: /service と /service/ 以下
+      exact: ["/service"]
+      prefix: ["/service/"]
     - key: contact
-      label: 問い合わせページ到達
-      path_contains: "/contact"
+      label: 問い合わせフォーム到達（一般）
+      rule_label: /contact（入力画面のみ）
+      exact: ["/contact", "/contact/", "/contact/index.html"]
+      group: cv
+    - key: b2b_contact
+      label: 問い合わせフォーム到達（BtoB）
+      rule_label: /b2b/contact（入力画面のみ）
+      exact: ["/b2b/contact", "/b2b/contact/"]
+      group: cv
     - key: document_request
-      label: 資料請求ページ到達
-      path_contains: "/download"
+      label: 資料請求ページ到達（一般）
+      rule_label: /download（入力画面のみ）
+      exact: ["/download", "/download/"]
+      group: cv
+    - key: b2b_document_request
+      label: 資料請求ページ到達（BtoB）
+      rule_label: /b2b/download（入力画面のみ）
+      exact: ["/b2b/download", "/b2b/download/"]
+      group: cv
+
+  # 流入元の区分（2026-11-23週〜）。GA4 の sessionSourceMedium（「参照元 / メディア」）ごとのセッション数を、
+  # 上から順に判定して1つの区分に入れる（生成AI → 広告 → 自然検索 → 直接 → 参照元 → その他・不明）。
+  # セッション数は区分の合計がサイト全体と一致する（ユーザー数は区分をまたいで重複するため、区分別には出さない）。
+  channels:
+    # 広告: メディアがこの正規表現に全体一致するもの（大文字小文字を区別しない）。
+    # 2026-11 に確認した値: universe / cpc（キャンペーン tcdleedcv）、google / cpc（TCD_企業認知 ほか）
+    ad_medium_regex: "(cpc|ppc|cpm|cpv|cpa|paid.*|display|banner|retargeting)"
+    # 生成AI: 参照元が sources のいずれかに全体一致（正規表現・大文字小文字を区別しない）するもの。
+    # 一致しなくても、メディアが include_mediums（GA4 が生成AIと分類したもの）なら「その他の生成AI」に入れる。
+    # Google（AI Overview・AIモード）と Bing（Copilot 検索を含む）は通常の検索と区別できないため、自然検索に入れる。
+    ai:
+      include_mediums: ["ai-assistant"]
+      services:
+        - label: ChatGPT
+          sources: ['chatgpt\.com', 'chat\.openai\.com', 'openai', 'chatgpt']
+        - label: Perplexity
+          sources: ['(www\.)?perplexity\.ai', 'perplexity']
+        - label: Gemini
+          sources: ['gemini\.google\.com', 'bard\.google\.com', 'gemini']
+        - label: Claude
+          sources: ['claude\.ai', 'claude']
+        - label: Copilot
+          sources: ['copilot\.com', 'copilot\.microsoft\.com', 'copilot\.cloud\.microsoft', 'copilot']
+        - label: DeepSeek
+          sources: ['chat\.deepseek\.com', 'deepseek']
+        - label: Grok
+          sources: ['grok\.com', 'grok']
+        - label: Mistral
+          sources: ['chat\.mistral\.ai']
+        - label: Poe
+          sources: ['poe\.com']
+        - label: Felo
+          sources: ['felo\.ai']
+        - label: Genspark
+          sources: ['genspark\.ai']
+  # 推移表の週数（当週を含む。月〜日の週＝GA4 の isoYearIsoWeek）
+  trend_weeks: 8
 
 # 問い合わせ実績（② 問い合わせ実績）の取得元（2026-11-02〜）。
 # Dot が集計した週次件数を Google スプレッドシート（TCD Workspace）に1週1行で記録し、パイプラインが読み取る。
@@ -52,4 +121,4 @@ ga4:
 inquiries:
   source: sheets
   sheet_id_env: INQUIRY_SHEET_ID
-  range: "weekly!A1:M"
+  range: "weekly!A1:Z"  # 列名で読む。フォーム区分の列（N列以降）を足しても読めるよう Z まで

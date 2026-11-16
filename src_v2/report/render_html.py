@@ -79,7 +79,69 @@ def _highlights_html(es: dict) -> str:
 
 # ── ① サイト全体のアクセス状況（GA4） ─────────────────────────────────────
 
+def _pct_html(v: float | None) -> str:
+    return "-" if v is None else f"{v:+.1f}%"
+
+
+def _n(v) -> str:
+    return "-" if v is None else f"{v:,}"
+
+
+def _table_html(head: list[str], rows: list[list[str]], num_from: int = 1) -> str:
+    def cls(i: int) -> str:
+        return ' class="num"' if i >= num_from else ""
+    th = "".join(f"<th{cls(i)}>{escape(h)}</th>" for i, h in enumerate(head))
+    body = "".join("<tr>" + "".join(f"<td{cls(i)}>{c}</td>" for i, c in enumerate(r)) + "</tr>" for r in rows)
+    return f'<table class="pages-table market-table"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>'
+
+
+def _site_usage_v2_html(su: dict) -> str:
+    rows = []
+    for row in su["rows"]:
+        for s in row:
+            if s.get("error"):
+                rows.append([escape(s["label"]), escape(s.get("rule_label") or "-"), "取得失敗", "-", "-"])
+                continue
+            change = ('<span class="muted">※異常値を含む</span>' if s.get("anomalies") else _pct_html(s["delta_pct"]))
+            rows.append([escape(s["label"]), escape(s.get("rule_label") or "-"), _n(s["current"]), _n(s["comparison"]), change])
+    html = [f"<h3>到達ユーザー（指標: GA4 {escape(su['metric_label'])}）</h3>",
+            _table_html(["セグメント", "集計対象（ページ）", "今週", "前週", "前週比"], rows, num_from=2),
+            _notes_html([su["metric_note"], *(f"異常値（原因未確認）: {a}" for a in su["anomaly_notes"]), *su["extra_notes"]])]
+    ch = su.get("channels")
+    if ch:
+        html.append("<h3>流入元別（指標: GA4 セッション数）</h3>")
+        if ch["status"] != "ok":
+            html.append(f"<p class='empty'>取得失敗（{escape(ch.get('error') or '-')}）</p>")
+        else:
+            crow = [[escape(r["label"]), f"{r['current']:,}", f"{r['comparison']:,}", _pct_html(r["delta_pct"]),
+                     "-" if r["share_pct"] is None else f"{r['share_pct']:.1f}%",
+                     "-" if r["engagement_rate"] is None else f"{r['engagement_rate']:.1f}%"] for r in ch["rows"]]
+            tot = ch["total"]
+            crow.append(["<strong>合計（サイト全体）</strong>", f"{tot['current']:,}", f"{tot['comparison']:,}",
+                         _pct_html(tot["delta_pct"]), "100.0%", "-"])
+            html.append(_table_html(["流入元", "今週", "前週", "前週比", "構成比", "エンゲージメント率"], crow))
+            notes = [su["channel_note"]]
+            if ch.get("ai_services"):
+                notes.append("生成AIの内訳（今週／前週）: " + "、".join(
+                    f"{s['service']} {s['current']}／{s['comparison']}" for s in ch["ai_services"]))
+            html.append(_notes_html(notes))
+    tr = su.get("trend")
+    if tr:
+        html.append("<h3>推移（直近8週・月〜日）</h3>")
+        if tr["status"] != "ok":
+            html.append(f"<p class='empty'>取得失敗（{escape(tr.get('error') or '-')}）</p>")
+        else:
+            trows = [[escape(r["week_label"]), f"{r['users_total']:,}", f"{r['users_non_ad']:,}", f"{r['sessions_total']:,}",
+                      f"{r['sessions_ad']:,}", f"{r['sessions_non_ad']:,}"] for r in tr["rows"]]
+            html.append(_table_html(["週", "アクティブユーザー数（全体）", "アクティブユーザー数（広告を除く）",
+                                     "セッション数（全体）", "うち広告", "セッション数（広告を除く）"], trows))
+            html.append(_notes_html([su["trend_note"]]))
+    return "".join(html)
+
+
 def _site_usage_html(site_usage: dict) -> str:
+    if site_usage.get("scheme") == "v2":
+        return _site_usage_v2_html(site_usage)
     segments = site_usage.get("segments") or []
     if not segments:
         return "<p class='empty'>GA4データなし</p>"
@@ -141,6 +203,22 @@ def _inquiries_html(inq: dict) -> str:
         <td class="num">{_inquiry_count_html(row['current'], missing)}</td>
         <td class="num">{_inquiry_cumulative_html(cum4, row['cumulative_4w'])}</td>
       </tr>""")
+    rate = inq.get("rate")
+    if rate:
+        rows.insert(2, f"""
+      <tr>
+        <td><strong>{escape(rate['label'])}</strong></td>
+        <td class="num">{escape(rate['current_label']) if rate['current_label'] else f'<span class="muted">{missing}</span>'}</td>
+        <td class="num">{escape(rate['cumulative_4w_label'])}</td>
+      </tr>""")
+    forms_html = ""
+    forms = inq.get("forms") or {}
+    if forms.get("state") == "ok":
+        forms_html = "<h3>フォーム区分（当週）</h3>" + _table_html(
+            ["項目", "一般", "BtoB", "不明"],
+            [[escape(r["label"]), str(r["general"]), str(r["b2b"]), str(r["unknown"])] for r in forms["rows"]])
+    elif forms.get("state"):
+        forms_html = f'<p class="note">フォーム区分（当週）: <span class="muted">{escape(forms["label"])}</span></p>'
     return f"""{status_html}
     <table class="pages-table market-table inquiry-table">
       <thead>
@@ -148,6 +226,7 @@ def _inquiries_html(inq: dict) -> str:
       </thead>
       <tbody>{"".join(rows)}</tbody>
     </table>
+    {forms_html}
     {_notes_html(inq["notes"])}"""
 
 
@@ -367,6 +446,57 @@ def _initiative_html(f: dict, show_confidence: bool = False) -> str:
     </li>"""
 
 
+_VERDICT_STATE = {"逆方向の変化の可能性": "critical", "効果の可能性あり": "good", "判断できない": "warning",
+                  "数値の変化のみ": "neutral", "効果確認待ち": "neutral", "評価不能": "neutral"}
+
+
+def _initiative_v2_html(item: dict) -> str:
+    facts = []
+    if item["elapsed_label"]:
+        facts.append(f"経過日数: {item['elapsed_label']}")
+    elif item.get("implemented_at"):
+        facts.append(f"実装日: {item['implemented_at']}")
+    if item["period_label"]:
+        facts.append(f"比較期間: {item['period_label']}")
+    if item["urls"]:
+        facts.append(f"対象ページ: {len(item['urls'])}件" + (f"（{item['urls'][0]}）" if len(item["urls"]) == 1 else ""))
+    if item["hypothesis"]:
+        facts.append(f"仮説: {item['hypothesis']}")
+    table = ""
+    if item["metrics_rows"]:
+        table = ("<p class='note'>数値の変化（対象ページ）と、同じ期間の比較対照（対象ページ以外）の変化</p>"
+                 + _table_html(["指標", "実装前", "実装後", "変化", "比較対照の変化"],
+                               [[escape(r["label"]), escape(r["pre"]), escape(r["post"]), escape(r["change"]),
+                                 escape(r["control_change"])] for r in item["metrics_rows"]]))
+    q = item.get("queries")
+    qlines = []
+    if q:
+        qlines.append(f"検索クエリの構成: {q['counts_label']}。実装後の表示回数のうち、実装前にも表示されていたクエリの割合 {q['shared_label']}")
+        for label, key in (("実装後の上位", "top"), ("増えたクエリ", "increased"), ("減ったクエリ", "decreased")):
+            if q[key]:
+                qlines.append(f"{label}: {'、'.join(q[key])}")
+    return f"""
+    <div class="initiative">
+      <h4>{escape(item['name'] or '-')}</h4>
+      <p>{_status_chip(f"判定: {item['verdict']}", _VERDICT_STATE.get(item['verdict'], 'neutral'))}
+         <span class="pill">主指標: {escape(item['primary_metric_label'])}</span></p>
+      {_notes_html(facts)}
+      {table}
+      {_notes_html(qlines) if qlines else ""}
+      {_notes_html([f"判定の理由: {'／'.join(item['reasons']) or '-'}", f"対応: {item['recommendation']}"])}
+    </div>"""
+
+
+def _initiatives_html(appendix: dict) -> tuple[str, str]:
+    ini = appendix.get("initiatives") or {"scheme": "legacy", "items": appendix["unknown_initiatives"], "notes": []}
+    if ini["scheme"] != "v2":
+        body = ("<ul class=\"findings\">" + "".join(_initiative_html(f, show_confidence=True) for f in ini["items"]) + "</ul>"
+                if ini["items"] else "<p class='empty'>なし</p>")
+        return "実装日未登録の施策", body
+    body = _notes_html(ini["notes"]) + ("".join(_initiative_v2_html(i) for i in ini["items"]) or "<p class='empty'>なし</p>")
+    return "施策の効果確認（実装前後の比較）", body
+
+
 # ── Appendix ────────────────────────────────────────────────────
 
 def _appendix_data_quality_html(dq: dict) -> str:
@@ -426,10 +556,7 @@ def _appendix_landing_pages_html(landing_pages: dict) -> str:
 
 def _appendix_html(appendix: dict, pm: dict, header: dict) -> str:
     other_pages_html = _pages_table_html(appendix["other_pages"], show_confidence=True)
-    unknown_initiatives_html = (
-        "<ul class=\"findings\">" + "".join(_initiative_html(f, show_confidence=True) for f in appendix["unknown_initiatives"]) + "</ul>"
-        if appendix["unknown_initiatives"] else "<p class='empty'>なし</p>"
-    )
+    initiatives_title, initiatives_html = _initiatives_html(appendix)
     all_findings_html = "<p class='note'>全" + str(len(appendix["all_findings"])) + "件（severity/confidence順）</p>" + _pages_table_html(
         [f for f in appendix["all_findings"] if f["category"] == "page"], show_confidence=True,
     )
@@ -447,8 +574,8 @@ def _appendix_html(appendix: dict, pm: dict, header: dict) -> str:
       <h3>少数データ・要確認以外のページ（{len(appendix["other_pages"])}件、※ Impressions {header['low_impressions_threshold']}未満は参考値）</h3>
       {other_pages_html}
 
-      <h3>実装日未登録の施策</h3>
-      {unknown_initiatives_html}
+      <h3>{escape(initiatives_title)}</h3>
+      {initiatives_html}
 
       <h3>上位ランディングページ（/branding/、定点観測対象外）</h3>
       {_appendix_landing_pages_html(appendix["landing_pages"])}
@@ -517,6 +644,8 @@ _STYLE = """
   h1 { font-size: 1.5rem; border-bottom: 2px solid var(--text-primary); padding-bottom: .6rem; margin-bottom: 1rem; }
   h2 { font-size: 1.2rem; margin: 2.2rem 0 1rem; padding-bottom: .3rem; border-bottom: 1px solid var(--gridline); }
   h3 { font-size: 1rem; margin: 1.4rem 0 .6rem; }
+  h4 { font-size: .95rem; margin: 1.2rem 0 .4rem; }
+  .initiative { border-top: 1px solid var(--border); padding-top: .4rem; margin-top: 1rem; }
   h4 { font-size: .9rem; margin: 1rem 0 .4rem; color: var(--text-secondary); }
   /* 帯表示（Appendix等で使用） */
   .trend-band { background: var(--market-surface); border-radius: 8px; padding: .8rem 1rem 1.1rem; margin-bottom: 1rem; }

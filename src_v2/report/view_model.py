@@ -130,6 +130,7 @@ _MARKET_ORDER = {"branding": 0, "inner_branding": 1}
 # ── ① サイトアクセス状況（GA4） ─────────────────────────────────────
 
 def _build_site_usage(ga4_summary: dict) -> dict:
+    """旧方式（analysis.json に access が無い週）の①。過去のレポートを同じ内容で再生成するため残す。"""
     segments = []
     for key, seg in (ga4_summary or {}).items():
         cur, prv = seg.get("current"), seg.get("comparison")
@@ -145,6 +146,59 @@ def _build_site_usage(ga4_summary: dict) -> dict:
     top = [seg for seg in segments if seg["key"] not in _CV_GA4_SEGMENTS]
     cv = [seg for seg in segments if seg["key"] in _CV_GA4_SEGMENTS]
     return {"segments": segments, "rows": [row for row in (top, cv) if row]}
+
+
+METRIC_USERS_LABEL = "アクティブユーザー数"
+METRIC_SESSIONS_LABEL = "セッション数"
+SITE_USAGE_METRIC_NOTE = ("到達ユーザーの指標はGA4の「アクティブユーザー数」（activeUsers）。各行は、その条件に合うページを"
+                          "期間中に1回以上表示したユーザー数で、複数の行に重複して数えるため合計はサイト全体と一致しない。")
+CHANNEL_NOTE = ("流入元の指標はGA4の「セッション数」（sessions。訪問の回数）で、上の到達ユーザー（人数）とは単位が違う。"
+                "参照元／メディアごとに1つの区分に入れるため、区分の合計はサイト全体のセッション数と一致する。"
+                "エンゲージメント率は、10秒以上の滞在・2ページ以上の閲覧・コンバージョンのいずれかがあったセッションの割合。")
+TREND_NOTE = ("「広告を除く」アクティブユーザー数は、広告以外の流入元からのセッションが週に1回以上あったユーザー数"
+              "（広告と広告以外の両方から来たユーザーも含む）。セッション数は広告の区分を除いた数。最新週は速報値。")
+
+
+def _anomaly_note(seg: dict, a: dict) -> str:
+    day = _md(a["date"])
+    if a["period"] == "current":
+        return (f"{seg['label']}: {day}の1日に{a['day_users']:,}人（日別の合計{a['days_total']:,}人、"
+                f"週の{METRIC_USERS_LABEL}{a['week_users']:,}人）。原因は特定していない。異常値として扱い、前週比は評価に使わない。")
+    return (f"{seg['label']}: 前週の値に、{day}の1日に集中した異常値（{a['day_users']:,}人）を含む。"
+            "原因は特定していない。前週比は評価に使わない。")
+
+
+def _build_trend(trend: dict | None) -> dict | None:
+    if not trend:
+        return None
+    if trend.get("status") != "ok":
+        return {"status": trend.get("status"), "error": trend.get("error"), "rows": []}
+    rows = [{"week_label": f"{_md(w['week_start'], weekday=False)}〜", "week_start": w["week_start"],
+             "users_total": w["users_total"], "users_non_ad": w["users_non_ad"],
+             "sessions_total": w["sessions_total"], "sessions_ad": w["sessions_ad"], "sessions_non_ad": w["sessions_non_ad"]}
+            for w in trend["weeks"]]
+    return {"status": "ok", "error": None, "rows": rows}
+
+
+def _build_access(access: dict, notes_cfg: list[dict], cur_end: str) -> dict:
+    """現行方式の①（2026-11-23週〜）。"""
+    segments = access["segments"]
+    anomaly_notes = [_anomaly_note(s, a) for s in segments for a in s["anomalies"]]
+    groups = [("main", "サイト全体・主要セクション"), ("cv", "問い合わせ・資料請求")]
+    rows = [[s for s in segments if s["group"] == g] for g, _ in groups]
+    return {
+        "scheme": "v2",
+        "metric_label": METRIC_USERS_LABEL,
+        "segments": segments,
+        "rows": [r for r in rows if r],
+        "anomaly_notes": anomaly_notes,
+        "metric_note": SITE_USAGE_METRIC_NOTE,
+        "channels": access.get("channels"),
+        "channel_note": CHANNEL_NOTE,
+        "trend": _build_trend(access.get("trend")),
+        "trend_note": TREND_NOTE,
+        "extra_notes": _period_notes(notes_cfg, "site_usage", cur_end),
+    }
 
 
 # ── ② 問い合わせ実績（config_v2/inquiries.yaml の確定済み件数） ──────────
@@ -234,6 +288,9 @@ _INQUIRY_STATUS_LABELS = {
     INQUIRY_NOT_CONFIGURED: "未集計（スプレッドシートが未設定。0件ではない）",
 }
 
+FORM_NOTE = ("フォーム区分は、送信されたフォームで 一般（/contact）／BtoB（/b2b/contact）／不明 に分けた件数。"
+             "一般問い合わせ・案件相談の件数の内訳で、合計は上の表と一致する。")
+
 WEEKLY_INQUIRY_NOTES = [
     "Dotが問い合わせ通知メールで確認・分類した件数（通知メールへの返信は除く）。サーバー側の未着分は未確認。",
     "分類はフォームの選択項目ではなく本文の内容による。判断が難しいものは「その他（要確認）」に含める。",
@@ -268,7 +325,53 @@ def _resolve_inquiry_week(start: str, end: str, manual: dict, sheet_rows: dict, 
     return {"start": start, "end": end, "status": status, "values": None, "warnings": warnings}
 
 
-def _build_weekly_inquiries(inquiries_cfg: list[dict], snapshot: dict | None, period: dict) -> dict:
+def _rate_label(consultation: int | None, total: int | None) -> str | None:
+    if consultation is None or total is None:
+        return None
+    if total == 0:
+        return "—（一般問い合わせ0件）"
+    return f"{consultation / total * 100:.1f}%（{consultation}/{total}）"
+
+
+_FORM_STATE_LABELS = {
+    "not_recorded": "未記録（スプレッドシートのフォーム区分の列が空）",
+    "invalid": "不整合（フォーム区分の合計が既存の件数と合わないため表示しない）",
+}
+
+
+def _build_forms(values: dict | None) -> dict:
+    """当週のフォーム区分（一般／BtoB／不明）。未記録・不整合は件数を出さない（0件として扱わない）。"""
+    if not values:
+        return {"state": None, "label": None, "rows": []}
+    forms = values.get("forms") or {"state": "not_recorded", "errors": []}
+    if forms["state"] != "ok":
+        return {"state": forms["state"], "label": _FORM_STATE_LABELS[forms["state"]], "rows": [],
+                "errors": forms.get("errors", [])}
+    rows = [{"label": label, **forms[key]} for key, label in
+            (("general_total", "一般問い合わせ"), ("project_consultation", "うち案件相談"))]
+    return {"state": "ok", "label": "記録あり", "rows": rows, "errors": []}
+
+
+def _contact_reach_note(site_usage: dict | None, values: dict | None) -> str | None:
+    """②の参考行: ①のフォーム到達（人数）と、問い合わせ・案件相談（件数）を並べる。単位が違うことを明記する。"""
+    if not site_usage or site_usage.get("scheme") != "v2":
+        return None
+    seg = {s["key"]: s for s in site_usage["segments"]}
+    reach = []
+    for key, label in (("contact", "一般"), ("b2b_contact", "BtoB")):
+        s = seg.get(key)
+        if s and s.get("current") is not None:
+            reach.append(f"{label}{s['current']:,}人")
+    if not reach:
+        return None
+    tail = (f" → 一般問い合わせ{values['general_total']:,}件 → うち案件相談{values['project_consultation']:,}件"
+            if values else " → 問い合わせ件数は未集計")
+    return (f"参考（同じ週）: 問い合わせフォーム到達（{METRIC_USERS_LABEL}）{'・'.join(reach)}{tail}。"
+            "フォーム到達は人数、問い合わせは件数で、単位が違う（到達数から送信率は計算しない）。")
+
+
+def _build_weekly_inquiries(inquiries_cfg: list[dict], snapshot: dict | None, period: dict,
+                            site_usage: dict | None = None) -> dict:
     """現行方式の②（レポート週＝月〜日）。未集計でも生成は止めず、状態を明示する。"""
     manual = {(w["start"], w["end"]): w for w in inquiries_cfg
               if w.get("scheme", config_loader.INQUIRY_SCHEME_WEEKLY) == config_loader.INQUIRY_SCHEME_WEEKLY}
@@ -300,12 +403,26 @@ def _build_weekly_inquiries(inquiries_cfg: list[dict], snapshot: dict | None, pe
         "cumulative_12w": cumulative[12]["counts"][key] if cumulative[12]["complete"] else None,
     } for key, label in _INQUIRY_ROWS]
 
+    by_key = {r["key"]: r for r in rows}
+    rate = {
+        "label": "案件相談率（案件相談÷一般問い合わせ）",
+        "current_label": _rate_label(by_key["project_consultation"]["current"], by_key["general_total"]["current"]),
+        "cumulative_4w_label": (_rate_label(by_key["project_consultation"]["cumulative_4w"], by_key["general_total"]["cumulative_4w"])
+                                if cumulative[4]["complete"] else inquiry_cumulative_label(cumulative[4], None)),
+    }
+    forms = _build_forms(values)
+
     notes = []
     if values and values["other_needs_review"]:
         notes.append(f"その他のうち要確認: {values['other_needs_review']}件")
-    case_12w = next(r for r in rows if r["key"] == "project_consultation")["cumulative_12w"]
+    case_12w = by_key["project_consultation"]["cumulative_12w"]
     notes.append(f"直近12週累計の案件相談: {inquiry_cumulative_label(cumulative[12], case_12w)}")
+    reach = _contact_reach_note(site_usage, values)
+    if reach:
+        notes.append(reach)
     warnings = [w for e in resolved.values() for w in e["warnings"]]
+    if forms["state"] == "invalid":
+        warnings.append(f"{week_start}の週のフォーム区分: {'／'.join(forms['errors'])}")
     if snapshot and snapshot.get("error") and snapshot.get("status") != "ok":
         warnings.insert(0, f"問い合わせ集計スプレッドシート: {snapshot['error']}")
     return {
@@ -314,9 +431,11 @@ def _build_weekly_inquiries(inquiries_cfg: list[dict], snapshot: dict | None, pe
         "status": current["status"],
         "status_label": _INQUIRY_STATUS_LABELS[current["status"]],
         "rows": rows,
+        "rate": rate,
+        "forms": forms,
         "current_needs_review": values["other_needs_review"] if values else None,
         "cumulative": cumulative,
-        "notes": notes + WEEKLY_INQUIRY_NOTES,
+        "notes": notes + WEEKLY_INQUIRY_NOTES + [FORM_NOTE],
         "warnings": warnings,
     }
 
@@ -582,6 +701,77 @@ def _build_category_page_trends(page_findings: list[dict], thresholds_cfg: dict,
 
 # ── ⑤ 施策評価 ──────────────────────────────────────────────────
 
+_INITIATIVE_ORDER = {"逆方向の変化の可能性": 0, "効果の可能性あり": 1, "判断できない": 2, "数値の変化のみ": 3,
+                     "効果確認待ち": 4, "評価不能": 5}
+
+
+def _fmt_ctr(v: float | None) -> str:
+    return "—" if v is None else f"{v * 100:.2f}%"
+
+
+def _fmt_pos(v: float | None) -> str:
+    return "—" if v is None else f"{v:.1f}"
+
+
+def _fmt_change(new, old, kind: str) -> str:
+    if new is None or old is None:
+        return "—"
+    if kind == "ctr":
+        return f"{(new - old) * 100:+.2f}pt"
+    if kind == "position":
+        return f"{new - old:+.1f}"
+    return f"{(new - old) / old * 100:+.1f}%" if old else ("±0" if new == old else "—（実装前0）")
+
+
+def _initiative_view(f: dict) -> dict:
+    """施策の効果確認の1件（現行方式の evidence を表示用に整える）。"""
+    ev = f.get("evidence") or {}
+    view = {"id": f["id"], "name": ev.get("name") or (f.get("source") or {}).get("initiative"),
+            "verdict": f.get("judgment"), "reasons": ev.get("reasons") or [], "recommendation": f["recommendation"],
+            "hypothesis": ev.get("hypothesis"), "primary_metric_label": "クリック率" if ev.get("primary_metric") == "ctr" else "表示回数・クリック数",
+            "implemented_at": ev.get("implemented_at"), "urls": ev.get("urls") or [], "metrics_rows": [], "period_label": None,
+            "elapsed_label": None, "queries": None, "overlaps": ev.get("overlaps") or []}
+    windows = ev.get("windows")
+    if ev.get("implemented_at") and ev.get("gsc_end") and windows:
+        view["elapsed_label"] = (f"実装日 {_md(ev['implemented_at'])} から{windows['elapsed_days']}日"
+                                 f"（Search Consoleの確定済み最新日 {_md(ev['gsc_end'])} まで）")
+        view["period_label"] = (f"実装前 {_md(windows['pre']['start'])}〜{_md(windows['pre']['end'])} と "
+                                f"実装後 {_md(windows['post']['start'])}〜{_md(windows['post']['end'])}（各{windows['days']}日。"
+                                f"実装日 {_md(windows['excluded_day'])} は公開前後が混ざるため除く）")
+    if ev.get("metrics"):
+        pre, post = ev["metrics"]["pre"], ev["metrics"]["post"]
+        cpre, cpost = (ev.get("control") or {}).get("pre"), (ev.get("control") or {}).get("post")
+        for key, label, fmt in (("impressions", "表示回数", lambda v: f"{v:,}"), ("clicks", "クリック数", lambda v: f"{v:,}"),
+                                ("ctr", "クリック率", _fmt_ctr), ("position", "平均掲載順位（参考）", _fmt_pos)):
+            control = "—"
+            if cpre and cpost and key in cpre:
+                control = _fmt_change(cpost[key], cpre[key], key)
+            view["metrics_rows"].append({"label": label, "pre": fmt(pre[key]), "post": fmt(post[key]),
+                                         "change": _fmt_change(post[key], pre[key], key), "control_change": control})
+    q = ev.get("queries")
+    if q:
+        share = q.get("shared_share")
+        view["queries"] = {
+            "shared_label": "—" if share is None else f"{share * 100:.0f}%",
+            "counts_label": f"実装前{q['pre_query_count']}件 → 実装後{q['post_query_count']}件",
+            "top": [f"「{x['query']}」{x['impressions']:,}回（{_fmt_pos(x['position'])}位）" for x in q["top_post"]],
+            "increased": [f"「{x['query']}」{x['pre']:,}→{x['post']:,}" for x in q["increased"]],
+            "decreased": [f"「{x['query']}」{x['pre']:,}→{x['post']:,}" for x in q["decreased"]],
+        }
+    return view
+
+
+INITIATIVE_NOTES = [
+    "実装前と実装後の同じ日数（最大28日。実装日当日は除く）を比べる。今週と先週の比較では施策を評価しない。",
+    "「数値の変化」は対象ページの値そのもの。「比較対照の変化」は同じ期間の対象ページ以外（サイト全体−対象ページ）の変化で、"
+    "季節・曜日・サイト全体の増減など施策以外の要因の目安。",
+    "判定は、対象ページの変化が比較対照の変化と日々の変動で説明できるかを統計的に確かめた結果。固定の増減率や順位で成功・失敗を決めない。"
+    "「効果の可能性あり」「逆方向の変化の可能性」でも、施策の効果と断定するものではない（最終判断は担当者）。",
+    "表示回数・クリック数が少ない指標（実装前・実装後のどちらかが表示回数50未満・クリック5未満）は、日々の変動と区別できないため評価しない。",
+    "平均掲載順位は数値が小さいほど上位。検索クエリの構成で変わるため判定に使わず、参考として示す（比較対照の平均掲載順位は計算しない）。",
+]
+
+
 def _build_initiatives_section(initiative_findings: list[dict]) -> tuple[dict, list[dict]]:
     known = [f for f in initiative_findings if "implemented_at" in (f.get("evidence") or {})]
     unknown = [f for f in initiative_findings if f not in known]
@@ -662,6 +852,54 @@ def _access_highlight(site_usage: dict, thresholds_cfg: dict) -> str | None:
     return line + ("、".join(changes) if changes else "主要ページへの到達は横ばい") + "。"
 
 
+def _access_highlight_v2(site_usage: dict, thresholds_cfg: dict) -> str | None:
+    """①の要約（現行方式）。指標名を明記し、広告を除いた値と、異常値を含むセグメントの扱いを書く。
+    数値の分解（どの区分が何件増えたか）は書くが、原因は推測しない。"""
+    change_pct = thresholds_cfg["display"]["access_change_pct"]
+    segments = [s for s in site_usage["segments"] if not s.get("error") and s.get("current") is not None]
+    site = next((s for s in segments if s["key"] == "site_wide"), None)
+    if site is None:
+        return None
+    delta = site.get("delta_pct")
+    parts = [f"サイト全体の{METRIC_USERS_LABEL}は{site['current']:,}" + (f"（前週比{_signed(delta)}%）" if delta is not None else "")]
+    trend = site_usage.get("trend") or {}
+    if trend.get("status") == "ok" and len(trend["rows"]) >= 2:
+        cur, prv = trend["rows"][-1], trend["rows"][-2]
+        if prv["users_non_ad"]:
+            d = (cur["users_non_ad"] - prv["users_non_ad"]) / prv["users_non_ad"] * 100
+            parts.append(f"広告を除くと{cur['users_non_ad']:,}（前週比{_signed(d)}%）")
+    line = "、".join(parts) + "。"
+
+    channels = site_usage.get("channels") or {}
+    if channels.get("status") == "ok" and channels.get("total"):
+        diff = channels["total"]["current"] - channels["total"]["comparison"]
+        movers = sorted(channels["rows"], key=lambda r: -abs(r["current"] - r["comparison"]))
+        top = movers[0] if movers else None
+        if top and diff and top["current"] != top["comparison"]:
+            line += (f"{METRIC_SESSIONS_LABEL}の前週差{diff:+,}のうち、最も大きいのは{top['label']}の"
+                     f"{top['current'] - top['comparison']:+,}。")
+
+    anomalous = {s["key"] for s in segments if s.get("anomalies")}
+    min_users = thresholds_cfg["display"].get("access_min_users", 0)
+    # 少人数のセグメント（例: 6→8人）の増減は、要約で「増加・減少」と書かない（表には出す）
+    others = [s for s in segments if s["key"] != "site_wide" and s.get("delta_pct") is not None and s["key"] not in anomalous
+              and max(s["current"] or 0, s["comparison"] or 0) >= min_users]
+    up = [s["label"].replace("到達", "") for s in others if s["delta_pct"] >= change_pct]
+    down = [s["label"].replace("到達", "") for s in others if s["delta_pct"] <= -change_pct]
+    changes = []
+    if up:
+        changes.append(f"{'・'.join(up)}への到達は増加")
+    if down:
+        changes.append(f"{'・'.join(down)}への到達は減少")
+    if changes:
+        line += "、".join(changes) + "。"
+    for s in segments:
+        for a in s.get("anomalies") or []:
+            when = "今週" if a["period"] == "current" else "前週"
+            line += f"{s['label']}は{when}の{_md(a['date'])}の1日に集中した異常値（原因未確認）を含むため、増減を評価しない。"
+    return line
+
+
 def _seo_highlight(rows: list[dict]) -> str | None:
     if not rows:
         return None
@@ -714,7 +952,9 @@ def _build_highlights(site_usage: dict, priority_markets: dict, thresholds_cfg: 
     """今週の要点（最大3項目）。優先順位は アクセス → SEO順位 → AIO引用（2026-10-13改善指示書）。
     analysis.jsonの数値から機械的に組み立て、原因の推測・提案は書かない。"""
     rows = priority_markets["table"]
-    lines = [_access_highlight(site_usage, thresholds_cfg), _seo_highlight(rows), _aio_highlight(rows)]
+    access = (_access_highlight_v2(site_usage, thresholds_cfg) if site_usage.get("scheme") == "v2"
+              else _access_highlight(site_usage, thresholds_cfg))
+    lines = [access, _seo_highlight(rows), _aio_highlight(rows)]
     return [line for line in lines if line]
 
 
@@ -791,6 +1031,9 @@ def _data_quality_extra_lines(periods: dict, inquiries: dict) -> list[str]:
     if revision and revision.get("skipped") == "hostnames_changed":
         lines.append(f"前週GA4（{revision['period']['start']}〜{revision['period']['end']}）の速報値→再取得値: "
                      "集計対象を本番サイトのみに変えた週のため比べない")
+    elif revision and revision.get("skipped") == "rules_changed":
+        lines.append(f"前週GA4（{revision['period']['start']}〜{revision['period']['end']}）の速報値→再取得値: "
+                     "ページの集計条件（完全一致・前方一致）を変えた週のため比べない")
     elif revision and revision.get("segments"):
         diffs = "、".join(
             f"{seg['label']} {seg['first']:,}→{seg['refetched']:,}"
@@ -835,15 +1078,28 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_c
     # カテゴリ別動向・施策評価は本文から削除したが、Appendix（要確認以外のページ／未登録施策）には残す
     _, other_pages = _build_category_page_trends(page_findings, thresholds_cfg, priority_market_urls)
     _, unknown_initiatives = _build_initiatives_section(initiative_findings)
+    # 現行方式（実装前後の比較、evidence に primary_metric がある）は全件を「施策の効果確認」に出す
+    if any("primary_metric" in (f.get("evidence") or {}) for f in initiative_findings):
+        initiatives_view = {
+            "scheme": "v2",
+            "items": [_initiative_view(f) for f in sorted(
+                initiative_findings, key=lambda f: (_INITIATIVE_ORDER.get(f.get("judgment"), 9), f["id"]))],
+            "notes": INITIATIVE_NOTES,
+        }
+    else:
+        initiatives_view = {"scheme": "legacy", "items": unknown_initiatives, "notes": []}
 
-    site_usage = _build_site_usage(analysis.get("ga4_summary", {}))
+    if analysis.get("access", {}).get("version"):
+        site_usage = _build_access(analysis["access"], notes_cfg, analysis["period"]["cur_end"])
+    else:
+        site_usage = _build_site_usage(analysis.get("ga4_summary", {}))
 
     data_quality = analysis["data_quality"]
     data_summary = analysis.get("data_summary", {})
 
     periods = _build_periods(analysis["period"], analysis.get("ga4_revision"))
     if periods["scheme"] == "weekly":
-        inquiries = _build_weekly_inquiries(inquiries_cfg, analysis.get("inquiries_snapshot"), analysis["period"])
+        inquiries = _build_weekly_inquiries(inquiries_cfg, analysis.get("inquiries_snapshot"), analysis["period"], site_usage)
     else:
         inquiries = _build_inquiries(inquiries_cfg, analysis["period"])
 
@@ -874,6 +1130,7 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_c
         "other_pages": other_pages,
         "landing_pages": {"top": landing_pages, "excluded": excluded_landing_pages},
         "unknown_initiatives": unknown_initiatives,
+        "initiatives": initiatives_view,
         "data_quality": {
             **data_quality,
             "label": header["data_quality_label"],

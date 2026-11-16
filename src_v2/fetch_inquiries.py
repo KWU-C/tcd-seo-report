@@ -19,7 +19,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from src_v2.config_loader import INQUIRY_COUNT_KEYS
+from src_v2.config_loader import INQUIRY_COUNT_KEYS, parse_form_breakdown
 
 JST = timezone(timedelta(hours=9))
 
@@ -109,7 +109,9 @@ def parse_row(raw: dict) -> dict:
             errors.append("other_needs_review が other を超えている")
 
     state = ROW_INVALID if errors else ROW_CONFIRMED
-    return {**parsed, **counts, "state": state, "errors": errors}
+    # フォーム区分（任意の列）は、不整合でも行全体を不整合にしない（既存の件数との整合性を保つ）
+    forms = parse_form_breakdown(raw, counts) if state == ROW_CONFIRMED else {"state": "not_recorded", "errors": []}
+    return {**parsed, **counts, "forms": forms, "state": state, "errors": errors}
 
 
 def parse_rows(values: list[list[Any]]) -> list[dict]:
@@ -166,7 +168,7 @@ def fetch_snapshot(inquiries_cfg: dict | None, credentials_file: str = "credenti
                         error="スプレッドシートが未設定（.env の INQUIRY_SHEET_ID）")
         return snapshot
     try:
-        values = fetcher(sheet_id, cfg.get("range", "weekly!A1:M"), credentials_file)
+        values = fetcher(sheet_id, cfg.get("range", "weekly!A1:Z"), credentials_file)
         snapshot["rows"] = parse_rows(values)
     except Exception as e:  # noqa: BLE001 - 問い合わせ実績の取得失敗ではレポート生成を止めない
         snapshot.update(status=SNAPSHOT_FETCH_FAILED, error=f"{type(e).__name__}: {e}")
