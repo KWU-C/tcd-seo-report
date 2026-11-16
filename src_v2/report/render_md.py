@@ -62,7 +62,7 @@ def _summary_md(su: dict) -> list[str]:
 
 
 def _site_usage_v2(su: dict) -> str:
-    out = _summary_md(su) + [f"**到達ユーザー（指標: GA4 {su['metric_label']}）**\n",
+    out = [f"**到達ユーザー（指標: GA4 {su['metric_label']}）**\n",
            f"| セグメント | 集計対象（ページ） | 今週（人） | 前週（人） | 前週比 |\n|---|---|---:|---:|---:|"]
     for row in su["rows"]:
         for s in row:
@@ -121,7 +121,8 @@ def _site_usage_v2(su: dict) -> str:
 
 def _site_usage_section(site_usage: dict) -> str:
     if site_usage.get("scheme") == "v2":
-        return _site_usage_v2(site_usage)
+        # 現行方式の①はサマリーだけ。詳細は render_markdown が「アクセスの詳細」として別の見出しで出す
+        return "\n".join(_summary_md(site_usage)) + "\n"
     segments = site_usage.get("segments") or []
     if not segments:
         return "GA4データなし\n"
@@ -414,6 +415,9 @@ def render_markdown(vm: dict) -> str:
 
     parts.append(f"## ① サイト全体のアクセス状況{sec['site_usage']}\n")
     parts.append(_site_usage_section(vm["site_usage"]))
+    if vm["site_usage"].get("scheme") == "v2":
+        parts.append(f"## アクセスの詳細{sec['site_usage']}\n")
+        parts.append(_site_usage_v2(vm["site_usage"]))
     if notes["site_usage"]:
         parts.append("\n".join(f"- {n}" for n in notes["site_usage"]) + "\n")
 

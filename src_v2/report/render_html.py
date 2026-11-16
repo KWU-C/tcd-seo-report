@@ -106,9 +106,7 @@ def _site_usage_v2_html(su: dict) -> str:
                 continue
             change = ('<span class="muted">※異常値を含む</span>' if s.get("anomalies") else _pct_html(s["delta_pct"]))
             rows.append([escape(s["label"]), escape(s.get("rule_label") or "-"), _n(s["current"]), _n(s["comparison"]), change])
-    html = [_summary_tiles_html(su),
-            f'<p class="note">カードの数値: GA4 {escape(su["metric_label"])}（人）。前週比は新しい集計条件どうしの比較。詳細は下の表。</p>',
-            f"<h3>到達ユーザー（指標: GA4 {escape(su['metric_label'])}）</h3>",
+    html = [f"<h3>到達ユーザー（指標: GA4 {escape(su['metric_label'])}）</h3>",
             _table_html(["セグメント", "集計対象（ページ）", "今週（人）", "前週（人）", "前週比"], rows, num_from=2),
             _notes_html([su["metric_note"], *su.get("rule_notes", []),
                          *(f"異常値（原因未確認）: {a}" for a in su["anomaly_notes"]), *su["extra_notes"]])]
@@ -151,9 +149,16 @@ def _site_usage_v2_html(su: dict) -> str:
     return "".join(html)
 
 
+def _site_usage_summary_html(su: dict) -> str:
+    """① サイト全体のアクセス状況（6カードのサマリー）。詳細は別のセクション「アクセスの詳細」。"""
+    return (_summary_tiles_html(su)
+            + f'<p class="note">カードの数値: GA4 {escape(su["metric_label"])}（人）。前週比は新しい集計条件どうしの比較。'
+              "詳細は下の「アクセスの詳細」。</p>")
+
+
 def _site_usage_html(site_usage: dict) -> str:
     if site_usage.get("scheme") == "v2":
-        return _site_usage_v2_html(site_usage)
+        return _site_usage_summary_html(site_usage)
     segments = site_usage.get("segments") or []
     if not segments:
         return "<p class='empty'>GA4データなし</p>"
@@ -775,6 +780,16 @@ def render_html(vm: dict) -> str:
     periods = header["periods"]
     sec = periods["sections"]
     notes = periods["notes"]
+    # 現行方式は、①（6カードのサマリー）と「アクセスの詳細」を別のセクションに分ける
+    v2_access = vm["site_usage"].get("scheme") == "v2"
+    access_detail_html = ""
+    if v2_access:
+        access_detail_html = f"""
+<section>
+  <h2>アクセスの詳細{escape(sec['site_usage'])}</h2>
+  {_site_usage_v2_html(vm["site_usage"])}{_notes_html(notes["site_usage"]) if notes["site_usage"] else ""}
+</section>
+"""
 
     body = f"""
 <div class="report-root">
@@ -783,8 +798,9 @@ def render_html(vm: dict) -> str:
 
 <section>
   <h2>① サイト全体のアクセス状況{escape(sec['site_usage'])}</h2>
-  {_site_usage_html(vm["site_usage"])}{_notes_html(notes["site_usage"]) if notes["site_usage"] else ""}
+  {_site_usage_html(vm["site_usage"])}{"" if v2_access else (_notes_html(notes["site_usage"]) if notes["site_usage"] else "")}
 </section>
+{access_detail_html}
 
 <section>
   <h2>② 問い合わせ実績{escape(sec['inquiries'])}</h2>

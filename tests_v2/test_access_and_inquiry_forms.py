@@ -317,16 +317,40 @@ def test_summary_tiles_reuse_detail_segments():
 
 
 def test_summary_tiles_render_same_numbers_as_table():
-    from src_v2.report.render_html import _site_usage_v2_html
+    from src_v2.report.render_html import _site_usage_html, _site_usage_v2_html
+    from src_v2.report.render_md import _site_usage_section
     su = _vm_site_usage()
-    html = _site_usage_v2_html(su)
-    head, _, table = html.partition("<h3>到達ユーザー")
-    assert head.count('class="stat-tile"') == 3
+    head, table = _site_usage_html(su), _site_usage_v2_html(su)
+    assert head.count('class="stat-tile"') == 3 and "<table" not in head
+    assert "stat-tile" not in table
     assert "3,741" in head and "+189.1%" in head and "3,741" in table and "+189.1%" in table
     assert "※異常値を含む" in head  # 資料請求（一般）は詳細の表と同じく前週比を出さない
-    md = render_markdown_section(su)
-    assert md.index("**サマリー") < md.index("**到達ユーザー")
-    assert "| サイト全体 | 3,741 | +189.1% |" in md
+    assert "| サイト全体 | 3,741 | +189.1% |" in _site_usage_section(su)
+    assert "**サマリー" not in render_markdown_section(su)
+
+
+def test_summary_and_detail_are_separate_sections():
+    su = _vm_site_usage()
+    inq = _inquiries({**BASE_ROW, **FORMS}, su)
+    vm = {
+        "header": {"periods": {"title": "t", "header_note": "n", "sections": {
+            "site_usage": "（11/9(月)〜11/15(日)）", "inquiries": "", "seo": "", "aio": ""},
+            "notes": {"site_usage": ["速報値の注記"], "seo": []}},
+            "data_quality_label": "pass", "weeks_available": 1, "low_impressions_threshold": 50},
+        "site_usage": su, "inquiries": inq, "executive_summary": {"blocks": ["x"], "narrative": None},
+        "priority_markets": {"table": [], "groups": [], "seo_notes": [], "aio_notes": []},
+        "appendix": {"data_quality": {}, "other_pages": [], "unknown_initiatives": [],
+                     "initiatives": {"scheme": "v2", "items": [], "notes": []},
+                     "landing_pages": {"top": [], "excluded": []}, "all_findings": []},
+    }
+    html, md = render_html(vm), render_markdown(vm)
+    sections = html.split("<section")
+    first = next(s for s in sections if "① サイト全体のアクセス状況" in s)
+    detail = next(s for s in sections if "アクセスの詳細（11/9(月)〜11/15(日)）" in s)
+    assert "stat-tile" in first and "到達ユーザー（指標" not in first
+    assert "到達ユーザー（指標" in detail and "流入元別" in detail and "速報値の注記" in detail
+    assert html.index("① サイト全体のアクセス状況") < html.index("アクセスの詳細") < html.index("② 問い合わせ実績")
+    assert md.index("## ① サイト全体") < md.index("## アクセスの詳細") < md.index("## ② 問い合わせ実績")
 
 
 def render_markdown_section(su):
