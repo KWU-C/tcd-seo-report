@@ -216,7 +216,7 @@ def test_markdown_and_html_render_v2_sections():
     }
     md, html = render_markdown(vm), render_html(vm)
     for text in ("到達ユーザー（指標: GA4 アクティブユーザー数）", "流入元別（指標: GA4 セッション数）",
-                 "アクティブユーザー数（広告を除く）", "案件相談率（案件相談÷一般問い合わせ）", "6.7%（1/15）",
+                 "ユーザー 広告を除く（人）", "案件相談率（案件相談÷一般問い合わせ）", "6.7%（1/15）",
                  "施策の効果確認（実装前後の比較）", "資料請求ページ到達（BtoB）" if False else "資料請求ページ到達（一般）"):
         assert text in md, text
         assert text in html, text
@@ -240,3 +240,65 @@ def test_review_notification_includes_anomaly(tmp_path):
                                                       "inquiries": {}, "appendix": {}}), encoding="utf-8")
     items = collect_review_items(tmp_path)
     assert any(i.startswith("GA4 異常値（原因未確認）: 資料請求ページ到達（一般）") for i in items)
+
+
+# ── 広告を除くユーザー数・セグメント別推移・新旧の差 ─────────────────
+
+from types import SimpleNamespace  # noqa: E402
+
+from src_v2 import fetch_ga4  # noqa: E402
+
+
+class _RecClient:
+    def __init__(self, rows=None):
+        self.requests = []
+        self.rows = rows or []
+
+    def run_report(self, request):
+        self.requests.append(request)
+        return SimpleNamespace(rows=self.rows, dimension_headers=[SimpleNamespace(name="isoYearIsoWeek")], row_count=len(self.rows))
+
+
+def _row(week, value):
+    return SimpleNamespace(dimension_values=[SimpleNamespace(value=week)], metric_values=[SimpleNamespace(value=str(value))])
+
+
+GA4_CFG = config_loader.load_pipeline_config()["ga4"]
+
+
+def test_non_ad_users_come_from_a_ga4_filtered_query_not_subtraction():
+    """「広告を除く」アクティブユーザー数は、広告以外のセッションに絞った GA4 の集計（ユーザーの重複を GA4 が除く）。"""
+    c = _RecClient([_row("202646", 1322)])
+    fetch_ga4.fetch_trend(GA4_CFG, "2026-11-09", c)
+    users_req = [r for r in c.requests if [m.name for m in r.metrics] == ["activeUsers"]]
+    assert len(users_req) == 2  # 全体と、広告を除く
+    non_ad = users_req[1].dimension_filter.and_group.expressions[1]
+    assert non_ad.not_expression.filter.field_name == "sessionMedium"
+    assert non_ad.not_expression.filter.string_filter.value == GA4_CFG["channels"]["ad_medium_regex"]
+
+
+def test_segment_trend_uses_new_rules_for_all_weeks():
+    c = _RecClient([_row("202640", 300), _row("202646", 433)])
+    st = fetch_ga4.fetch_segment_trend(GA4_CFG, "2026-11-09", c)
+    assert st["weeks"][0] == "2026-09-21" and st["weeks"][-1] == "2026-11-09"
+    service_req = c.requests[[s["key"] for s in GA4_CFG["segments"]].index("service")]
+    paths = _paths(service_req.dimension_filter.and_group.expressions[1])
+    assert ("pagePath", ["/service"]) in paths and ("pagePath", "/service/") in paths
+    assert st["segments"]["service"]["values"]["2026-09-28"] == 300
+
+
+def test_legacy_comparison_only_in_transition_window():
+    c = _RecClient([SimpleNamespace(dimension_values=[], metric_values=[SimpleNamespace(value="73")])])
+    got = fetch_ga4.fetch_legacy_comparison(GA4_CFG, PERIOD, c)
+    assert got["service"] == {"legacy_rule": "/service/", "current": 73}
+    assert "b2b_contact" not in got
+    late = {**PERIOD, "report_week_start": "2026-12-14", "report_week_end": "2026-12-20"}
+    assert fetch_ga4.fetch_legacy_comparison(GA4_CFG, late, _RecClient()) is None
+
+
+def test_rule_change_note_and_legacy_diff_are_shown():
+    access = build_access_summary(_bundle(), THRESHOLDS)
+    access["legacy_comparison"] = {"document_request": {"legacy_rule": "/download", "current": 164}}
+    su = view_model._build_access(access, [], "2026-11-13")
+    assert "11/16配信分までのレポートの値とは一致しない" in su["rule_notes"][0]
+    assert su["rule_notes"][1] == "集計条件の変更による差（今週の値。旧条件の部分一致→新条件）: 資料請求ページ到達（一般） 164→154人。"

@@ -155,6 +155,10 @@ SITE_USAGE_METRIC_NOTE = ("到達ユーザーの指標はGA4の「アクティ�
 CHANNEL_NOTE = ("流入元の指標はGA4の「セッション数」（sessions。訪問の回数）で、上の到達ユーザー（人数）とは単位が違う。"
                 "参照元／メディアごとに1つの区分に入れるため、区分の合計はサイト全体のセッション数と一致する。"
                 "エンゲージメント率は、10秒以上の滞在・2ページ以上の閲覧・コンバージョンのいずれかがあったセッションの割合。")
+RULE_CHANGE_NOTE = ("2026-11-23配信分から、ページの集計条件をURLの部分一致から完全一致・前方一致に変えた"
+                    "（/service・/works のトップを含め、/works/service や /b2b/contact などの混入を除いた。"
+                    "/download と /b2b/download は別の行）。11/16配信分までのレポートの値とは一致しない。"
+                    "前週の値とセグメント別の推移は、過去の週も新しい条件で集計し直した値。")
 TREND_NOTE = ("「広告を除く」アクティブユーザー数は、広告以外の流入元からのセッションが週に1回以上あったユーザー数"
               "（広告と広告以外の両方から来たユーザーも含む）。セッション数は広告の区分を除いた数。最新週は速報値。")
 
@@ -180,6 +184,36 @@ def _build_trend(trend: dict | None) -> dict | None:
     return {"status": "ok", "error": None, "rows": rows}
 
 
+def _build_segment_trend(st: dict | None, segments: list[dict]) -> dict | None:
+    if not st:
+        return None
+    weeks = st["weeks"]
+    rows = []
+    for s in segments:
+        seg = (st.get("segments") or {}).get(s["key"])
+        if not seg:
+            continue
+        rows.append({"label": s["label"], "error": seg.get("error"),
+                     "values": [seg["values"].get(w) for w in weeks] if not seg.get("error") else []})
+    return {"week_labels": [f"{_md(w, weekday=False)}〜" for w in weeks], "rows": rows}
+
+
+def _legacy_note(legacy: dict | None, segments: list[dict]) -> str | None:
+    """移行期間の注記: 旧定義（部分一致）と新定義での今週の値。"""
+    if not legacy:
+        return None
+    by_key = {s["key"]: s for s in segments}
+    parts = []
+    for key, v in legacy.items():
+        s = by_key.get(key)
+        if not s or v.get("current") is None or s.get("current") is None:
+            continue
+        parts.append(f"{s['label']} {v['current']:,}→{s['current']:,}人")
+    if not parts:
+        return None
+    return "集計条件の変更による差（今週の値。旧条件の部分一致→新条件）: " + "、".join(parts) + "。"
+
+
 def _build_access(access: dict, notes_cfg: list[dict], cur_end: str) -> dict:
     """現行方式の①（2026-11-23週〜）。"""
     segments = access["segments"]
@@ -193,6 +227,8 @@ def _build_access(access: dict, notes_cfg: list[dict], cur_end: str) -> dict:
         "rows": [r for r in rows if r],
         "anomaly_notes": anomaly_notes,
         "metric_note": SITE_USAGE_METRIC_NOTE,
+        "rule_notes": [n for n in (RULE_CHANGE_NOTE, _legacy_note(access.get("legacy_comparison"), segments)) if n],
+        "segment_trend": _build_segment_trend(access.get("segment_trend"), segments),
         "channels": access.get("channels"),
         "channel_note": CHANNEL_NOTE,
         "trend": _build_trend(access.get("trend")),
@@ -701,8 +737,9 @@ def _build_category_page_trends(page_findings: list[dict], thresholds_cfg: dict,
 
 # ── ⑤ 施策評価 ──────────────────────────────────────────────────
 
-_INITIATIVE_ORDER = {"逆方向の変化の可能性": 0, "効果の可能性あり": 1, "判断できない": 2, "数値の変化のみ": 3,
-                     "効果確認待ち": 4, "評価不能": 5}
+_INITIATIVE_ORDER = {"比較対照と異なる減少（原因未確定）": 0, "比較対照と異なる増加（原因未確定）": 1,
+                     "指標で方向が異なる（原因未確定）": 2, "数値の変化のみ": 3, "効果確認待ち": 4, "評価不能": 5,
+                     "検索流入の前後比較の対象外": 6, "評価対象未設定": 7}
 
 
 def _fmt_ctr(v: float | None) -> str:
@@ -728,7 +765,8 @@ def _initiative_view(f: dict) -> dict:
     ev = f.get("evidence") or {}
     view = {"id": f["id"], "name": ev.get("name") or (f.get("source") or {}).get("initiative"),
             "verdict": f.get("judgment"), "reasons": ev.get("reasons") or [], "recommendation": f["recommendation"],
-            "hypothesis": ev.get("hypothesis"), "primary_metric_label": "クリック率" if ev.get("primary_metric") == "ctr" else "表示回数・クリック数",
+            "hypothesis": ev.get("hypothesis"), "primary_metric_label": (None if ev.get("evaluation_method") == "index"
+                                     else "クリック率" if ev.get("primary_metric") == "ctr" else "表示回数・クリック数"),
             "implemented_at": ev.get("implemented_at"), "urls": ev.get("urls") or [], "metrics_rows": [], "period_label": None,
             "elapsed_label": None, "queries": None, "overlaps": ev.get("overlaps") or []}
     windows = ev.get("windows")
@@ -742,7 +780,7 @@ def _initiative_view(f: dict) -> dict:
         pre, post = ev["metrics"]["pre"], ev["metrics"]["post"]
         cpre, cpost = (ev.get("control") or {}).get("pre"), (ev.get("control") or {}).get("post")
         for key, label, fmt in (("impressions", "表示回数", lambda v: f"{v:,}"), ("clicks", "クリック数", lambda v: f"{v:,}"),
-                                ("ctr", "クリック率", _fmt_ctr), ("position", "平均掲載順位（参考）", _fmt_pos)):
+                                ("ctr", "クリック率", _fmt_ctr), ("position", "平均掲載順位（参考・小さいほど上位）", _fmt_pos)):
             control = "—"
             if cpre and cpost and key in cpre:
                 control = _fmt_change(cpost[key], cpre[key], key)
@@ -764,11 +802,13 @@ def _initiative_view(f: dict) -> dict:
 INITIATIVE_NOTES = [
     "実装前と実装後の同じ日数（最大28日。実装日当日は除く）を比べる。今週と先週の比較では施策を評価しない。",
     "「数値の変化」は対象ページの値そのもの。「比較対照の変化」は同じ期間の対象ページ以外（サイト全体−対象ページ）の変化で、"
-    "季節・曜日・サイト全体の増減など施策以外の要因の目安。",
-    "判定は、対象ページの変化が比較対照の変化と日々の変動で説明できるかを統計的に確かめた結果。固定の増減率や順位で成功・失敗を決めない。"
-    "「効果の可能性あり」「逆方向の変化の可能性」でも、施策の効果と断定するものではない（最終判断は担当者）。",
+    "季節・曜日・サイト全体の増減など、施策以外の要因の目安。",
+    "判定は観測した事実の分類で、因果関係の判定ではない。「比較対照と異なる増加／減少（原因未確定）」は、対象ページの変化が"
+    "比較対照の変化と日々の変動では説明しにくいことを示すだけで、施策の効果・悪影響とは判断していない（原因の確認は担当者）。"
+    "固定の増減率や順位で成功・失敗を決めない。",
     "表示回数・クリック数が少ない指標（実装前・実装後のどちらかが表示回数50未満・クリック5未満）は、日々の変動と区別できないため評価しない。",
     "平均掲載順位は数値が小さいほど上位。検索クエリの構成で変わるため判定に使わず、参考として示す（比較対照の平均掲載順位は計算しない）。",
+    "正規化（canonical）・インデックスの施策は、表示回数・クリック率の前後比較では判定しない（URL検査・インデックス登録レポートで確認する）。",
 ]
 
 

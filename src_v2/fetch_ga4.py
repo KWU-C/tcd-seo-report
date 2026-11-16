@@ -35,7 +35,7 @@ from google.analytics.data_v1beta.types import (
 from src_v2.auth import get_ga4_credentials
 from src_v2.ga4_channels import AD, CHANNEL_KEYS, classify_channel
 
-ACCESS_VERSION = 2
+ACCESS_VERSION = 3
 METRIC_USERS = "activeUsers"
 METRIC_SESSIONS = "sessions"
 
@@ -259,6 +259,44 @@ def fetch_trend(ga4_cfg: dict, report_week_start: str, client) -> dict:
     return {"status": "ok", "error": None, "start": start, "end": end, "weeks": rows}
 
 
+def fetch_segment_trend(ga4_cfg: dict, report_week_start: str, client) -> dict:
+    """セグメント別の到達ユーザー（activeUsers）の直近 N 週。過去の週も現在の条件（exact・prefix）で取り直す。"""
+    weeks = int(ga4_cfg.get("trend_weeks", 8))
+    start, end = trend_range(report_week_start, weeks)
+    week_starts = [(date.fromisoformat(start) + timedelta(days=7 * k)).isoformat() for k in range(weeks)]
+    out: dict[str, dict] = {}
+    for seg in ga4_cfg["segments"]:
+        try:
+            values = {w: 0 for w in week_starts}
+            flt = _and_filters(_hostname_filter(ga4_cfg.get("hostnames")), segment_filter(seg))
+            for keys, v in _run(client, ga4_cfg["property_id"], ["isoYearIsoWeek"], [METRIC_USERS], [("all", start, end)], flt):
+                values[_iso_week_start(keys["isoYearIsoWeek"])] = int(v[0])
+            out[seg["key"]] = {"label": seg["label"], "values": values, "error": None}
+        except Exception as e:  # noqa: BLE001
+            out[seg["key"]] = {"label": seg["label"], "values": {}, "error": f"{type(e).__name__}: {e}"}
+    return {"metric": METRIC_USERS, "start": start, "end": end, "weeks": week_starts, "segments": out}
+
+
+def fetch_legacy_comparison(ga4_cfg: dict, period: dict, client) -> dict | None:
+    """移行期間だけ、旧定義（部分一致）での当週の到達ユーザーを取る（新旧の差の注記用）。期間外は None。"""
+    until = ga4_cfg.get("legacy_comparison_until")
+    if not until or period["report_week_end"] > str(until):
+        return None
+    out = {}
+    for seg in ga4_cfg["segments"]:
+        if not seg.get("legacy_path_contains"):
+            continue
+        legacy = {"path_contains": seg["legacy_path_contains"]}
+        try:
+            rows = _run(client, ga4_cfg["property_id"], [], [METRIC_USERS],
+                        [("current", period["report_week_start"], period["report_week_end"])],
+                        _and_filters(_hostname_filter(ga4_cfg.get("hostnames")), segment_filter(legacy)))
+            out[seg["key"]] = {"legacy_rule": seg["legacy_path_contains"], "current": int(rows[0][1][0]) if rows else 0}
+        except Exception as e:  # noqa: BLE001
+            out[seg["key"]] = {"legacy_rule": seg["legacy_path_contains"], "current": None, "error": str(e)}
+    return out
+
+
 def fetch_access(ga4_cfg: dict, period: dict, credentials_file: str = "credentials.json",
                  client: BetaAnalyticsDataClient | None = None) -> tuple[dict, dict]:
     """① の GA4 一式。戻り値: (segments, {"version", "channels", "trend"})。失敗は項目ごとに記録して継続する。"""
@@ -275,7 +313,9 @@ def fetch_access(ga4_cfg: dict, period: dict, credentials_file: str = "credentia
     segments = fetch_segments(ga4_cfg, *cur, *prv, client=client)
     return segments, {"version": ACCESS_VERSION,
                       "channels": fetch_channels(ga4_cfg, cur, prv, client),
-                      "trend": fetch_trend(ga4_cfg, period["report_week_start"], client)}
+                      "trend": fetch_trend(ga4_cfg, period["report_week_start"], client),
+                      "segment_trend": fetch_segment_trend(ga4_cfg, period["report_week_start"], client),
+                      "legacy_comparison": fetch_legacy_comparison(ga4_cfg, period, client)}
 
 
 def backfill_access(period_dir: Path, ga4_cfg: dict, credentials_file: str = "credentials.json",

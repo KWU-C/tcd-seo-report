@@ -122,4 +122,6 @@ def build_access_summary(bundle: dict, thresholds_cfg: dict) -> dict:
         "segments": _segments(bundle, cfg),
         "channels": _channels(access.get("channels")),
         "trend": access.get("trend"),
+        "segment_trend": access.get("segment_trend"),
+        "legacy_comparison": access.get("legacy_comparison"),
     }

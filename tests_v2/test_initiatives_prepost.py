@@ -106,8 +106,9 @@ def test_rise_beyond_control_is_possible_effect(tmp_path):
     item, sd = _item(target=lambda d, pre: ((100 if pre else 160) + rng.randint(-5, 5), (3 if pre else 6)),
                      site=lambda d: (10000 + rng.randint(-300, 300), 200))
     f = initiatives.analyze_initiatives(_md(tmp_path, MD_COUNTS), _bundle("内部リンク施策", item, sd), [], THRESHOLDS)[0]
-    assert f["judgment"] == "効果の可能性あり"
-    assert "担当者" in f["recommendation"]
+    assert f["judgment"] == "比較対照と異なる増加（原因未確定）"
+    assert "施策の効果とは断定していない" in f["recommendation"]
+    assert "原因（施策・検索クエリの構成・同時期の変更・季節要因など）は確定していない" in f["message"]
 
 
 def test_waiting_until_min_post_days(tmp_path):
@@ -125,7 +126,7 @@ def test_unknown_date_and_no_target_reasons(tmp_path):
                                   "items": {"A": {"status": "no_date"}, "B": {"status": "no_target", "implemented_at": "2026-10-19"}}}}
     fa, fb = initiatives.analyze_initiatives(_md(tmp_path, md), bundle, [], THRESHOLDS)
     assert fa["judgment"] == "評価不能" and "実装日が未登録" in fa["message"]
-    assert fb["judgment"] == "評価不能" and "対象ページを特定できない" in fb["message"]
+    assert fb["judgment"] == "評価対象未設定" and "対象ページを特定できない" in fb["message"]
 
 
 def test_legacy_bundle_without_prepost_data_is_not_assessable(tmp_path):
@@ -157,7 +158,7 @@ def test_view_model_shows_elapsed_days_and_periods(tmp_path):
     v = view_model._initiative_view({**f, "display_message": f["message"]})
     assert v["elapsed_label"] == "実装日 10/2(金) から42日（Search Consoleの確定済み最新日 11/13(金) まで）"
     assert "実装前 9/4(金)〜10/1(木) と 実装後 10/17(土)〜11/13(金)（各28日" in v["period_label"]
-    assert [r["label"] for r in v["metrics_rows"]] == ["表示回数", "クリック数", "クリック率", "平均掲載順位（参考）"]
+    assert [r["label"] for r in v["metrics_rows"]] == ["表示回数", "クリック数", "クリック率", "平均掲載順位（参考・小さいほど上位）"]
 
 
 def test_small_counts_are_not_assessable_even_if_ratio_jumps(tmp_path):
@@ -176,4 +177,29 @@ def test_adverse_label_is_hedged(tmp_path):
     item, sd = _item(target=lambda d, pre: ((160 if pre else 100) + rng.randint(-5, 5), (6 if pre else 3)),
                      site=lambda d: (10000 + rng.randint(-300, 300), 200))
     f = initiatives.analyze_initiatives(_md(tmp_path, MD_COUNTS), _bundle("内部リンク施策", item, sd), [], THRESHOLDS)[0]
-    assert f["judgment"] == "逆方向の変化の可能性" and f["severity"] == "warning"
+    assert f["judgment"] == "比較対照と異なる減少（原因未確定）" and f["severity"] == "info"
+    assert "施策の悪影響とは判断していない" in f["message"]
+    assert "表示回数（対象 " in f["message"] and "比較対照 " in f["message"]
+    for word in ("悪化", "逆効果", "失敗"):
+        assert word not in f["message"] + f["recommendation"]
+
+
+def test_canonical_without_target_is_not_set_and_not_compared(tmp_path):
+    md = "## アーカイブページのcanonical・URL整合性改善\n\n- 対象: 一覧系ページ全般\n- 実装日: 2026-10-19\n"
+    name = "アーカイブページのcanonical・URL整合性改善"
+    bundle = {"period": {"cur_end": "2026-11-13"},
+              "initiatives_gsc": {"version": 1, "gsc_end": "2026-11-13", "site_daily": {},
+                                  "items": {name: {"status": "no_target", "implemented_at": "2026-10-19"}}}}
+    f = initiatives.analyze_initiatives(_md(tmp_path, md), bundle, [], THRESHOLDS)[0]
+    assert f["judgment"] == "評価対象未設定"
+    assert "表示回数・クリック率の前後比較では判定しない" in f["message"]
+    assert "URL 検査" in f["recommendation"]
+    assert "metrics" not in f["evidence"]
+
+
+def test_index_method_with_urls_is_not_judged_by_search_metrics(tmp_path):
+    md = "## 一覧の正規URL修正\n\n- 対象URL: " + URL + "\n- 実装日: 2026-10-02\n- 評価方法: 正規化・インデックス確認\n"
+    item, sd = _item(target=lambda d, pre: (100 if pre else 300, 3 if pre else 30))
+    f = initiatives.analyze_initiatives(_md(tmp_path, md), _bundle("一覧の正規URL修正", item, sd), [], THRESHOLDS)[0]
+    assert f["judgment"] == "検索流入の前後比較の対象外"
+    assert "metrics" not in f["evidence"]

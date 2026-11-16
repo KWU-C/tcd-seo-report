@@ -50,7 +50,7 @@ def _num(v) -> str:
 
 def _site_usage_v2(su: dict) -> str:
     out = [f"**到達ユーザー（指標: GA4 {su['metric_label']}）**\n",
-           f"| セグメント | 集計対象（ページ） | 今週 | 前週 | 前週比 |\n|---|---|---:|---:|---:|"]
+           f"| セグメント | 集計対象（ページ） | 今週（人） | 前週（人） | 前週比 |\n|---|---|---:|---:|---:|"]
     for row in su["rows"]:
         for s in row:
             if s.get("error"):
@@ -59,7 +59,8 @@ def _site_usage_v2(su: dict) -> str:
             flag = "※異常値を含む" if s.get("anomalies") else _pct_label(s["delta_pct"])
             out.append(f"| {s['label']} | {s.get('rule_label') or '-'} | {_num(s['current'])} | {_num(s['comparison'])} | {flag} |")
     out.append("")
-    out += [f"- {n}" for n in [su["metric_note"], *(f"異常値（原因未確認）: {a}" for a in su["anomaly_notes"]), *su["extra_notes"]]]
+    out += [f"- {n}" for n in [su["metric_note"], *su.get("rule_notes", []),
+                                *(f"異常値（原因未確認）: {a}" for a in su["anomaly_notes"]), *su["extra_notes"]]]
 
     ch = su.get("channels")
     if ch:
@@ -67,7 +68,7 @@ def _site_usage_v2(su: dict) -> str:
         if ch["status"] != "ok":
             out.append(f"取得失敗（{ch.get('error') or '-'}）")
         else:
-            out.append("| 流入元 | 今週 | 前週 | 前週比 | 構成比 | エンゲージメント率 |\n|---|---:|---:|---:|---:|---:|")
+            out.append("| 流入元 | 今週（セッション） | 前週（セッション） | 前週比 | 構成比 | エンゲージメント率 |\n|---|---:|---:|---:|---:|---:|")
             for r in ch["rows"]:
                 share = "-" if r["share_pct"] is None else f"{r['share_pct']:.1f}%"
                 eng = "-" if r["engagement_rate"] is None else f"{r['engagement_rate']:.1f}%"
@@ -85,13 +86,23 @@ def _site_usage_v2(su: dict) -> str:
         if tr["status"] != "ok":
             out.append(f"取得失敗（{tr.get('error') or '-'}）")
         else:
-            out.append("| 週 | アクティブユーザー数（全体） | アクティブユーザー数（広告を除く） | セッション数（全体） | うち広告 | セッション数（広告を除く） |")
+            out.append("| 週 | ユーザー 全体（人） | ユーザー 広告を除く（人） | セッション 全体 | うち広告 | セッション 広告を除く |")
             out.append("|---|---:|---:|---:|---:|---:|")
             for r in tr["rows"]:
                 out.append(f"| {r['week_label']} | {r['users_total']:,} | {r['users_non_ad']:,} | {r['sessions_total']:,} "
                            f"| {r['sessions_ad']:,} | {r['sessions_non_ad']:,} |")
             out.append("")
             out.append(f"- {su['trend_note']}")
+    st = su.get("segment_trend")
+    if st and st["rows"]:
+        out.append(f"\n**セグメント別の推移（指標: GA4 {su['metric_label']}・直近8週・新しい集計条件で再集計）**\n")
+        out.append("| セグメント（人） | " + " | ".join(st["week_labels"]) + " |")
+        out.append("|---|" + "---:|" * len(st["week_labels"]))
+        for r in st["rows"]:
+            cells = ["取得失敗"] * len(st["week_labels"]) if r["error"] else [_num(v) for v in r["values"]]
+            out.append(f"| {r['label']} | " + " | ".join(cells) + " |")
+        out.append("")
+        out.append("- 各週（月〜日）にそのページを1回以上表示したユーザー数。最新週は速報値。")
     return "\n".join(out) + "\n"
 
 
@@ -272,7 +283,8 @@ def _initiative_row(f: dict, show_confidence: bool = False) -> str:
 
 
 def _initiative_v2(item: dict) -> str:
-    lines = [f"#### {item['name']}\n", f"**判定: {item['verdict']}**（主指標: {item['primary_metric_label']}）\n"]
+    metric = f"（主指標: {item['primary_metric_label']}）" if item["primary_metric_label"] else "（評価方法: 正規化・インデックス確認）"
+    lines = [f"#### {item['name']}\n", f"**判定: {item['verdict']}**{metric}\n"]
     if item["elapsed_label"]:
         lines.append(f"- 経過日数: {item['elapsed_label']}")
     elif item.get("implemented_at"):
@@ -297,7 +309,7 @@ def _initiative_v2(item: dict) -> str:
             lines.append(f"  - 増えたクエリ: {'、'.join(q['increased'])}")
         if q["decreased"]:
             lines.append(f"  - 減ったクエリ: {'、'.join(q['decreased'])}")
-    lines.append(f"- 判定の理由: {'／'.join(item['reasons']) or '-'}")
+    lines += [f"- 判定の理由: {r}" for r in item["reasons"]] or ["- 判定の理由: -"]
     lines.append(f"- 対応: {item['recommendation']}")
     lines.append("")
     return "\n".join(lines)

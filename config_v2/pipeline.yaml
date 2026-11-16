@@ -43,21 +43,25 @@ ga4:
     - key: magazine
       label: マガジン到達
       rule_label: /branding と /branding/ 以下
+      legacy_path_contains: "/branding/"   # 旧定義（2026-11-16週まで）。移行期間の比較表示用
       exact: ["/branding"]
       prefix: ["/branding/"]
     - key: works
       label: Works到達
       rule_label: /works と /works/ 以下
+      legacy_path_contains: "/works/"   # 旧定義（2026-11-16週まで）。移行期間の比較表示用
       exact: ["/works"]
       prefix: ["/works/"]
     - key: service
       label: Service到達
       rule_label: /service と /service/ 以下
+      legacy_path_contains: "/service/"   # 旧定義（2026-11-16週まで）。移行期間の比較表示用
       exact: ["/service"]
       prefix: ["/service/"]
     - key: contact
       label: 問い合わせフォーム到達（一般）
       rule_label: /contact（入力画面のみ）
+      legacy_path_contains: "/contact"   # 旧定義（2026-11-16週まで）。移行期間の比較表示用
       exact: ["/contact", "/contact/", "/contact/index.html"]
       group: cv
     - key: b2b_contact
@@ -68,6 +72,7 @@ ga4:
     - key: document_request
       label: 資料請求ページ到達（一般）
       rule_label: /download（入力画面のみ）
+      legacy_path_contains: "/download"   # 旧定義（2026-11-16週まで）。移行期間の比較表示用
       exact: ["/download", "/download/"]
       group: cv
     - key: b2b_document_request
@@ -111,8 +116,12 @@ ga4:
           sources: ['felo\.ai']
         - label: Genspark
           sources: ['genspark\.ai']
-  # 推移表の週数（当週を含む。月〜日の週＝GA4 の isoYearIsoWeek）
+  # 推移表の週数（当週を含む。月〜日の週＝GA4 の isoYearIsoWeek）。セグメント別の推移も同じ週数で、
+  # 過去の週も含めてすべて現在の条件（exact・prefix）で取り直す。
   trend_weeks: 8
+  # 集計条件の変更（2026-11-23週〜）の移行期間。レポート週の末日がこの日以前の週だけ、legacy_path_contains（旧定義）
+  # での当週の値も取得し、新旧の差をレポートに注記する。
+  legacy_comparison_until: "2026-12-13"
 
 # 問い合わせ実績（② 問い合わせ実績）の取得元（2026-11-02〜）。
 # Dot が集計した週次件数を Google スプレッドシート（TCD Workspace）に1週1行で記録し、パイプラインが読み取る。

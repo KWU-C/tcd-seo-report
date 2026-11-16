@@ -92,7 +92,9 @@ def _table_html(head: list[str], rows: list[list[str]], num_from: int = 1) -> st
         return ' class="num"' if i >= num_from else ""
     th = "".join(f"<th{cls(i)}>{escape(h)}</th>" for i, h in enumerate(head))
     body = "".join("<tr>" + "".join(f"<td{cls(i)}>{c}</td>" for i, c in enumerate(r)) + "</tr>" for r in rows)
-    return f'<table class="pages-table market-table"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>'
+    # 狭い画面（スマートフォン）では表だけを横にスクロールさせる（ページ全体をはみ出させない）
+    return (f'<div class="table-scroll" style="overflow-x:auto;-webkit-overflow-scrolling:touch">'
+            f'<table class="pages-table market-table"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>')
 
 
 def _site_usage_v2_html(su: dict) -> str:
@@ -105,8 +107,9 @@ def _site_usage_v2_html(su: dict) -> str:
             change = ('<span class="muted">※異常値を含む</span>' if s.get("anomalies") else _pct_html(s["delta_pct"]))
             rows.append([escape(s["label"]), escape(s.get("rule_label") or "-"), _n(s["current"]), _n(s["comparison"]), change])
     html = [f"<h3>到達ユーザー（指標: GA4 {escape(su['metric_label'])}）</h3>",
-            _table_html(["セグメント", "集計対象（ページ）", "今週", "前週", "前週比"], rows, num_from=2),
-            _notes_html([su["metric_note"], *(f"異常値（原因未確認）: {a}" for a in su["anomaly_notes"]), *su["extra_notes"]])]
+            _table_html(["セグメント", "集計対象（ページ）", "今週（人）", "前週（人）", "前週比"], rows, num_from=2),
+            _notes_html([su["metric_note"], *su.get("rule_notes", []),
+                         *(f"異常値（原因未確認）: {a}" for a in su["anomaly_notes"]), *su["extra_notes"]])]
     ch = su.get("channels")
     if ch:
         html.append("<h3>流入元別（指標: GA4 セッション数）</h3>")
@@ -119,7 +122,7 @@ def _site_usage_v2_html(su: dict) -> str:
             tot = ch["total"]
             crow.append(["<strong>合計（サイト全体）</strong>", f"{tot['current']:,}", f"{tot['comparison']:,}",
                          _pct_html(tot["delta_pct"]), "100.0%", "-"])
-            html.append(_table_html(["流入元", "今週", "前週", "前週比", "構成比", "エンゲージメント率"], crow))
+            html.append(_table_html(["流入元", "今週（セッション）", "前週（セッション）", "前週比", "構成比", "エンゲージメント率"], crow))
             notes = [su["channel_note"]]
             if ch.get("ai_services"):
                 notes.append("生成AIの内訳（今週／前週）: " + "、".join(
@@ -133,9 +136,16 @@ def _site_usage_v2_html(su: dict) -> str:
         else:
             trows = [[escape(r["week_label"]), f"{r['users_total']:,}", f"{r['users_non_ad']:,}", f"{r['sessions_total']:,}",
                       f"{r['sessions_ad']:,}", f"{r['sessions_non_ad']:,}"] for r in tr["rows"]]
-            html.append(_table_html(["週", "アクティブユーザー数（全体）", "アクティブユーザー数（広告を除く）",
-                                     "セッション数（全体）", "うち広告", "セッション数（広告を除く）"], trows))
+            html.append(_table_html(["週", "ユーザー 全体（人）", "ユーザー 広告を除く（人）",
+                                     "セッション 全体", "うち広告", "セッション 広告を除く"], trows))
             html.append(_notes_html([su["trend_note"]]))
+    st = su.get("segment_trend")
+    if st and st["rows"]:
+        html.append(f"<h3>セグメント別の推移（指標: GA4 {escape(su['metric_label'])}・直近8週・新しい集計条件で再集計）</h3>")
+        srows = [[escape(r["label"])] + (["取得失敗"] * len(st["week_labels"]) if r["error"] else [_n(v) for v in r["values"]])
+                 for r in st["rows"]]
+        html.append(_table_html(["セグメント（人）", *st["week_labels"]], srows))
+        html.append(_notes_html(["各週（月〜日）にそのページを1回以上表示したユーザー数。最新週は速報値。"]))
     return "".join(html)
 
 
@@ -446,8 +456,8 @@ def _initiative_html(f: dict, show_confidence: bool = False) -> str:
     </li>"""
 
 
-_VERDICT_STATE = {"逆方向の変化の可能性": "critical", "効果の可能性あり": "good", "判断できない": "warning",
-                  "数値の変化のみ": "neutral", "効果確認待ち": "neutral", "評価不能": "neutral"}
+# 判定は観測の分類で、良し悪しの評価ではないため、色（良い・悪い）を付けない
+_VERDICT_STATE: dict[str, str] = {}
 
 
 def _initiative_v2_html(item: dict) -> str:
@@ -479,11 +489,11 @@ def _initiative_v2_html(item: dict) -> str:
     <div class="initiative">
       <h4>{escape(item['name'] or '-')}</h4>
       <p>{_status_chip(f"判定: {item['verdict']}", _VERDICT_STATE.get(item['verdict'], 'neutral'))}
-         <span class="pill">主指標: {escape(item['primary_metric_label'])}</span></p>
+         <span class="pill">{escape(f"主指標: {item['primary_metric_label']}" if item['primary_metric_label'] else "評価方法: 正規化・インデックス確認")}</span></p>
       {_notes_html(facts)}
       {table}
       {_notes_html(qlines) if qlines else ""}
-      {_notes_html([f"判定の理由: {'／'.join(item['reasons']) or '-'}", f"対応: {item['recommendation']}"])}
+      {_notes_html([*(f"判定の理由: {r}" for r in item['reasons']), f"対応: {item['recommendation']}"])}
     </div>"""
 
 

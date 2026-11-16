@@ -36,15 +36,26 @@ _KEY_MAP = {
     "仮説": "hypothesis",
     "成功シグナル": "success_signal",
     "主指標": "primary_metric",
+    "評価方法": "evaluation_method",
 }
 
-# 判定（judgment）
+# 判定（judgment）。観測した事実（比較対照と異なる変化があるか）と、原因（施策の効果か）を分ける。
+# 比較対照と異なる変化を観測しても、原因は確定しない（施策・検索クエリの構成・同時期の変更・季節要因などがありうる）。
 VERDICT_NOT_ASSESSABLE = "評価不能"
+VERDICT_NOT_SET = "評価対象未設定"
+VERDICT_OTHER_METHOD = "検索流入の前後比較の対象外"
 VERDICT_WAITING = "効果確認待ち"
 VERDICT_CHANGE_ONLY = "数値の変化のみ"
-VERDICT_POSSIBLE = "効果の可能性あり"
-VERDICT_ADVERSE = "逆方向の変化の可能性"
-VERDICT_MIXED = "判断できない"
+VERDICT_POSSIBLE = "比較対照と異なる増加（原因未確定）"
+VERDICT_ADVERSE = "比較対照と異なる減少（原因未確定）"
+VERDICT_MIXED = "指標で方向が異なる（原因未確定）"
+ALL_VERDICTS = (VERDICT_NOT_ASSESSABLE, VERDICT_NOT_SET, VERDICT_OTHER_METHOD, VERDICT_WAITING, VERDICT_CHANGE_ONLY,
+                VERDICT_POSSIBLE, VERDICT_ADVERSE, VERDICT_MIXED)
+
+# 評価方法。正規化（canonical）・インデックスの施策は、検索流入（表示回数・クリック率）の前後比較では判定しない。
+METHOD_SEARCH = "search"
+METHOD_INDEX = "index"
+_INDEX_KEYWORDS = ("canonical", "正規化", "インデックス")
 
 # 主指標
 METRIC_CTR = "ctr"
@@ -115,6 +126,12 @@ def primary_metric(initiative: dict) -> str:
         if explicit and label in explicit:
             return metric
     return METRIC_CTR if "クリック率" in (initiative.get("hypothesis") or "") else METRIC_COUNTS
+
+
+def evaluation_method(initiative: dict) -> str:
+    """「評価方法」欄に 正規化・インデックス とあれば index。欄が無ければ施策名に canonical・正規化・インデックス を含むかで判定。"""
+    text = initiative.get("evaluation_method") or initiative["name"]
+    return METHOD_INDEX if any(k in text.lower() for k in _INDEX_KEYWORDS) else METHOD_SEARCH
 
 
 def _slug(name: str) -> str:
@@ -243,8 +260,21 @@ def query_composition(pre: dict[str, dict], post: dict[str, dict], n: int = 3) -
 
 # ── 判定 ─────────────────────────────────────────────────────────
 
-def _verdict(primary: str, tests: dict, t_crit: float) -> tuple[str, list[str]]:
-    """主指標の検定結果から判定と理由を決める。"""
+def _observation(m: str, tests: dict, metrics: dict, control: dict) -> str:
+    """観測した事実の文。数値と、比較対照・日々の変動との関係だけを書き、原因には触れない。"""
+    def pct(new, old):
+        return "—" if not old else f"{(new - old) / old * 100:+.1f}%"
+    if m == "ctr":
+        tgt = f"{(metrics['post']['ctr'] or 0) * 100:.2f}%←{(metrics['pre']['ctr'] or 0) * 100:.2f}%"
+        ctl = f"{(control['post']['ctr'] or 0) * 100:.2f}%←{(control['pre']['ctr'] or 0) * 100:.2f}%"
+        return f"クリック率（対象 {tgt}、比較対照 {ctl}）"
+    return (f"{METRIC_NAMES[m]}（対象 {pct(metrics['post'][m], metrics['pre'][m])}、"
+            f"比較対照 {pct(control['post'][m], control['pre'][m])}）")
+
+
+def _verdict(primary: str, tests: dict, t_crit: float, metrics: dict | None = None,
+             control: dict | None = None) -> tuple[str, list[str]]:
+    """主指標の検定結果から判定と理由を決める。理由は観測した事実に限り、原因は書かない。"""
     names = ["ctr"] if primary == METRIC_CTR else ["impressions", "clicks"]
     reasons, up, down, assessable = [], [], [], []
     for m in names:
@@ -254,28 +284,38 @@ def _verdict(primary: str, tests: dict, t_crit: float) -> tuple[str, list[str]]:
             continue
         assessable.append(m)
         if test["t"] >= t_crit:
-            up.append(METRIC_NAMES[m])
+            up.append(m)
         elif test["t"] <= -t_crit:
-            down.append(METRIC_NAMES[m])
+            down.append(m)
+
+    def obs(ms):
+        return "・".join(_observation(m, tests, metrics, control) if metrics and control else METRIC_NAMES[m] for m in ms)
+
+    cause = "原因（施策・検索クエリの構成・同時期の変更・季節要因など）は確定していない"
     if not assessable:
         return VERDICT_NOT_ASSESSABLE, reasons
     if up and down:
-        return VERDICT_MIXED, reasons + [f"{'・'.join(up)}は比較対照より増え、{'・'.join(down)}は減っている"]
+        return VERDICT_MIXED, reasons + [f"{obs(up)}は比較対照より増え、{obs(down)}は比較対照より減った。{cause}"]
     if up:
-        return VERDICT_POSSIBLE, reasons + [f"{'・'.join(up)}の変化が、同じ期間の対象ページ以外の変化と比べて、日々の変動では説明しにくい"]
+        return VERDICT_POSSIBLE, reasons + [
+            f"{obs(up)}で、対象ページの変化が比較対照と異なり、日々の変動の範囲を超えている。{cause}"]
     if down:
-        return VERDICT_ADVERSE, reasons + [f"{'・'.join(down)}が、同じ期間の対象ページ以外と比べて、日々の変動では説明しにくい減り方をしている"]
+        return VERDICT_ADVERSE, reasons + [
+            f"{obs(down)}で、対象ページの変化が比較対照と異なり、日々の変動の範囲を超えている。"
+            f"{cause}。施策の悪影響とは判断していない"]
     return VERDICT_CHANGE_ONLY, reasons + [
         "対象ページの変化は、同じ期間の対象ページ以外の変化と日々の変動で説明できる範囲（施策の効果とは判断しない）"]
 
 
 _RECOMMENDATIONS = {
     VERDICT_NOT_ASSESSABLE: "評価できる材料がそろうまで、効果とも失敗とも判断しない",
+    VERDICT_NOT_SET: "対象URLを docs/current-initiatives.md に登録する",
+    VERDICT_OTHER_METHOD: "Search Console の URL 検査（Google が選んだ正規URL）とページのインデックス登録レポートで確認する",
     VERDICT_WAITING: "実装後のデータがそろうまで観測を続ける（途中の数値で判断しない）",
     VERDICT_CHANGE_ONLY: "施策の効果とは判断せず、観測を続ける",
-    VERDICT_POSSIBLE: "担当者が検索クエリ・ページの変化を確かめて、効果かどうかを判断する",
-    VERDICT_ADVERSE: "担当者が検索クエリ・ページの変化を確かめて、施策との関係を判断する",
-    VERDICT_MIXED: "担当者が指標ごとの変化を確かめて判断する",
+    VERDICT_POSSIBLE: "変化した検索クエリ・ページ、同時期の変更を担当者が確かめる（施策の効果とは断定していない）",
+    VERDICT_ADVERSE: "変化した検索クエリ・ページ、同時期の変更を担当者が確かめる（施策の悪影響とは断定していない）",
+    VERDICT_MIXED: "指標ごとの変化を担当者が確かめる（原因は確定していない）",
 }
 
 
@@ -309,10 +349,21 @@ def evaluate(ini: dict, item: dict | None, site_daily: dict, all_items: dict, re
         raw = (ini.get("implemented_at") or "").strip()
         reasons.append("実装日が未登録" if not raw or raw.lower() == "unknown" else f"実装日「{raw}」を日付として読めない")
         return {**ev, "verdict": VERDICT_NOT_ASSESSABLE, "reasons": reasons}
+    method = evaluation_method(ini)
+    ev["evaluation_method"] = method
+    if method == METHOD_INDEX:
+        # 正規化・インデックスの施策は、表示回数・クリック率の前後比較では判定しない（別種の施策として扱う）
+        base = "正規化（canonical）・インデックスの施策のため、表示回数・クリック率の前後比較では判定しない"
+        if status == "no_target" or not (item or {}).get("urls"):
+            return {**ev, "verdict": VERDICT_NOT_SET,
+                    "reasons": [base, "対象URLが docs/current-initiatives.md に登録されていない"],
+                    "recommendation": "対象URLを登録したうえで、Search Console の URL 検査（Google が選んだ正規URL）と"
+                                      "ページのインデックス登録レポートで確認する"}
+        return {**ev, "verdict": VERDICT_OTHER_METHOD, "urls": item.get("urls"), "reasons": [base]}
     if item is None:
         return {**ev, "verdict": VERDICT_NOT_ASSESSABLE, "reasons": ["比較用のSearch Consoleデータが無い（取得前の週）"]}
     if status == "no_target":
-        return {**ev, "verdict": VERDICT_NOT_ASSESSABLE,
+        return {**ev, "verdict": VERDICT_NOT_SET,
                 "reasons": ["対象ページを特定できない（docs/current-initiatives.md に「対象URL」が無い）"]}
     if status == "not_started":
         return {**ev, "verdict": VERDICT_WAITING, "reasons": ["実装後のSearch Consoleデータがまだ無い"]}
@@ -345,9 +396,9 @@ def evaluate(ini: dict, item: dict | None, site_daily: dict, all_items: dict, re
         "ctr": ctr_test(pre_t, post_t, ev["control"]["pre"], ev["control"]["post"], low.get("low_clicks", 1)),
     }
     ev["tests"] = tests
-    verdict, reasons = _verdict(primary, tests, review_cfg["significance_t"])
+    verdict, reasons = _verdict(primary, tests, review_cfg["significance_t"], ev["metrics"], ev["control"])
     if overlaps and verdict in (VERDICT_POSSIBLE, VERDICT_ADVERSE, VERDICT_MIXED):
-        reasons.append(f"同じ期間に対象ページが重なる施策（{'・'.join(f'「{o}」' for o in overlaps)}）があり、どの施策の影響かは切り分けられない")
+        reasons.append(f"同じ期間に対象ページが重なる施策（{'・'.join(f'「{o}」' for o in overlaps)}）があり、どの施策と関係するかは切り分けられない")
     elif overlaps:
         reasons.append(f"対象ページが重なる施策（{'・'.join(f'「{o}」' for o in overlaps)}）が同じ期間にある")
     return {**ev, "verdict": verdict, "reasons": reasons}
@@ -384,10 +435,11 @@ def analyze_initiatives(
         findings.append(make_finding(
             id=f"initiative-{_slug(name)}",
             category="initiative",
-            severity="warning" if verdict == VERDICT_ADVERSE else "info",
-            confidence="Not assessable" if verdict in (VERDICT_NOT_ASSESSABLE, VERDICT_WAITING) else "Medium",
+            severity="info",  # 比較対照と異なる変化でも原因は確定していないため、警告にしない
+            confidence="Not assessable" if verdict in (VERDICT_NOT_ASSESSABLE, VERDICT_NOT_SET, VERDICT_OTHER_METHOD,
+                                                       VERDICT_WAITING) else "Medium",
             message=_message(name, ev),
-            recommendation=_RECOMMENDATIONS[verdict],
+            recommendation=ev.pop("recommendation", None) or _RECOMMENDATIONS[verdict],
             judgment=verdict,
             evidence=ev,
             source={"initiative": name},
