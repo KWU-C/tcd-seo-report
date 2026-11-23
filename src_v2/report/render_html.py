@@ -823,7 +823,7 @@ def render_html(vm: dict) -> str:
 </section>
 
 <section class="datastudio-link">
-  <a class="datastudio-button" href="https://datastudio.google.com/reporting/4d67c760-d3dc-4a1e-b2d2-47ce3b44f69a/page/p_m2bpi11y5d" target="_blank" rel="noopener">Data Studio で確認する →</a>
+  <a class="datastudio-button" href="https://datastudio.google.com/reporting/735a0062-1dd7-4e9b-9122-e6c308ad11f8/page/p_idoislic9d" target="_blank" rel="noopener">Data Studio で確認する →</a>
 </section>
 
 {_appendix_html(vm["appendix"], vm["priority_markets"], header)}
