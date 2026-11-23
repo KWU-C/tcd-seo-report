@@ -88,6 +88,14 @@ def test_api_timeout_retries_by_remote_ids_preserves_human_review():
     assert remote[0]["human"] == "承認済" and remote[1]["human"] == "改善"
 
 
+def test_url_typed_evidence_column_and_machine_note():
+    records = parse_report(raw(report()), "now")
+    req = sheet_requests(records, set(), 123, 28, 200, spreadsheet_id="book")[-1]["updateCells"]
+    cells = req["rows"][0]["values"]
+    assert cells[11]["userEnteredValue"]["stringValue"] == "https://docs.google.com/spreadsheets/d/book/edit#gid=123&range=A29:P29"
+    assert json.loads(cells[5]["note"])["source_item"]["verdict"] == report()["appendix"]["initiatives"]["items"][0]["verdict"]
+
+
 def test_failed_publication_does_not_change_source_or_lose_history(tmp_path):
     reports = tmp_path / "reports"; source = reports / "week" / "report.json"
     source.parent.mkdir(parents=True); source.write_bytes(raw(report())); before = source.read_bytes()

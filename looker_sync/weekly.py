@@ -123,7 +123,7 @@ def all_events(db):
     return [json.loads(r[0]) for r in db.execute("SELECT payload FROM events ORDER BY generated_at, id")]
 
 
-def sheet_requests(records, existing_ids, sheet_id, next_row, grid_rows, exemplar=None):
+def sheet_requests(records, existing_ids, sheet_id, next_row, grid_rows, exemplar=None, spreadsheet_id=None):
     """Pure request builder: append NEW rows, never write existing human cells.
 
     PASTE_FORMAT/DATA_VALIDATION only; no literal/formula/chip copying.
@@ -143,9 +143,18 @@ def sheet_requests(records, existing_ids, sheet_id, next_row, grid_rows, exempla
                   "startColumnIndex": 0, "endColumnIndex": 16}
         for paste_type in ("PASTE_FORMAT", "PASTE_DATA_VALIDATION"):
             requests.append({"copyPaste": {"source": source, "destination": target, "pasteType": paste_type}})
-    requests.append({"updateCells": {"range": target,
-                    "rows": [{"values": [{"userEnteredValue": {"stringValue": str(v)}} for v in r["row"]]}
-                             for r in pending], "fields": "userEnteredValue"}})
+    rows = []
+    for offset, record in enumerate(pending):
+        cells = [{"userEnteredValue": {"stringValue": str(v)}} for v in record["row"]]
+        # This existing column is URL-typed in Looker; keep a real ledger URL, not prose.
+        cells[11] = {"userEnteredValue": {"stringValue":
+                     f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid={sheet_id}&range=A{next_row+offset+1}:P{next_row+offset+1}"
+                     if spreadsheet_id else ""}}
+        cells[5]["note"] = canonical({"source_id": record["source_id"], "source_sha256": record["source_sha256"],
+                           "source_generated_at": record["generated_at"], "imported_at": record["imported_at"],
+                           "source_item": record["source_item"], "windows": record["windows"]})
+        rows.append({"values": cells})
+    requests.append({"updateCells": {"range": target, "rows": rows, "fields": "userEnteredValue,note"}})
     return requests
 
 
@@ -174,7 +183,7 @@ class SheetsSink:
             raise ValueError("施策評価 headers changed; refuse to write")
         existing_ids = {r[0] for r in values[1:] if r and r[0]}
         requests = sheet_requests(records, existing_ids, sheet["sheetId"], len(values), grid_rows,
-                                  exemplar=1 if len(values) > 1 else None)
+                                  exemplar=1 if len(values) > 1 else None, spreadsheet_id=self.book)
         if not requests:
             return 0
         basic_filter = matches[0].get("basicFilter")
