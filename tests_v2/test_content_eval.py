@@ -201,3 +201,20 @@ def test_aio_daily_context_reads_only_window_and_queries(tmp_path):
     ctx = summary._aio_daily_context(bundle, tmp_path)
     assert ctx["window"] == {"start": "2026-11-09", "end": "2026-11-23"}
     assert [r["date"] for r in ctx["by_query"]["東京"]] == ["2026-11-20"] and "他" not in ctx["by_query"]
+
+
+def test_regional_lp_flat_is_not_called_stable_for_region_keywords():
+    f = _page(_m(283, 2, 9.1), _m(269, 0, 9.1), objective="regional", url="https://tcd.jp/osaka")
+    f["evidence"]["title"] = "大阪のブランディング会社｜TCD"
+    f["evidence"]["top_queries"] = [{"query": "tcd", "impressions": 30}, {"query": "dccd", "impressions": 10}]
+    p = ce._evaluate_page(f, TH, [], [])
+    assert p["status"] == ce.STATUS_STABLE  # 区分（判定）は変えない
+    assert p["evaluation"].startswith("全クエリ平均順位は横ばい（平均9.1位）。ただし地域キーワードでの評価は別途確認")
+    assert "「大阪」を含まない検索語" in p["evaluation"] and "1ページ目" not in p["evaluation"]
+
+
+def test_aio_comparison_supplements_only_explain_uncomparable_items():
+    changes = ce.build_aio_changes([_mf("大阪", _snap(rec="undeterminable"), _snap(rec="undeterminable")),
+                                    _mf("東京", _snap(cited=True, rec="recommended"), _snap())], [_kw("大阪"), _kw("東京")])
+    sup = ce.aio_comparison_supplements(changes)
+    assert sup == ["大阪: TCDの会社推薦は前回 判定不可・今回 判定不可のため前回比較不可"]

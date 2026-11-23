@@ -461,39 +461,73 @@ def _page_cell(p: dict) -> str:
 
 
 def _lead_md(c: dict) -> str:
+    """④ 今週のSEO/AIO・コンテンツ評価。①〜③の数値・事実は繰り返さない。"""
     lead = c["lead"]
-    out = ["**最重要の変化**\n"] + ([f"- {h}" for h in lead["changes"]] or ["- 該当なし"]) + [""]
-    out += ["**今週の評価**\n"] + [f"- [{e['kind']}] {e['text']}" for e in lead["evaluation"]] + [""]
+    out = ["**今週の評価**\n"] + [f"- [{e['kind']}] {e['text']}" for e in lead["evaluation"]] + [""]
     out += ["**次の対応**\n"] + ([f"{n}. {a}" for n, a in enumerate(lead["actions"], 1)] or ["- 該当なし"]) + [""]
-    out.append("- 順位の変化は前週比（1週分）で、施策の効果判定ではない。AIOの変化は各回1回ずつの観測の比較。"
-               "改善候補は③、全ページの評価と区分の基準はAppendix、AIOの前回比較は②。")
+    out.append("- 数値と観測事実は①〜③。順位の変化は前週比（1週分）で、施策の効果判定ではない。AIOの変化は各回1回ずつの観測の比較。"
+               "根拠の詳細は⑤〜⑦、全ページの評価と区分の基準はAppendix。")
+    return "\n".join(out) + "\n"
+
+
+def _aio_top_md(c: dict) -> str:
+    names = {"generated": "AIO生成", "cited": "引用", "recommended": "推薦"}
+    out = ["| キーワード | AIO生成 | TCD引用 | TCD推薦 | 前回からの変化 |", "|---|---|---|---|---|"]
+    for ch in c["aio"]["changes"]:
+        parts = []
+        for item in ("cited", "recommended", "generated"):
+            v = ch["items"][item]
+            if v["direction"]:
+                t = f"{names[item]} {v['change']}"
+                parts.append(f"**{t}**" if v["direction"] == "lost" and item in ("cited", "recommended") else t)
+        if parts:
+            change = "・".join(parts)
+        elif not ch["previous_available"]:
+            change = "前回比較不可"
+        else:
+            unknown = [names[k] for k in ("cited", "recommended") if ch["items"][k]["change"] == "前回比較不可"]
+            change = "変化なし" + (f"（{'・'.join(unknown)}は前回比較不可）" if unknown else "")
+        it = ch["items"]
+        out.append(f"| {ch['market_label']} | {it['generated']['cur']} | {it['cited']['cur']} | {it['recommended']['cur']} | {change} |")
+    obs = c["aio"]["changes"][0] if c["aio"]["changes"] else None
+    out.append("")
+    if obs:
+        out.append(f"- 前回 {obs['previous_observed']} → 今回 {obs['current_observed']} の観測（各キーワード1回）の比較。")
+    out.append("- 「判定不可」「対象外」は「なし」とは別（判定できない・推薦の判定対象ではない）。前回比較の詳細・引用ドメイン・競合・日次観測の補足は⑤。")
+    return "\n".join(out) + "\n"
+
+
+def _seo_top_md(c: dict, seo_notes: list[str]) -> str:
+    out = ["| キーワード | 月間検索Vol.（参考） | 平均順位 | 前週比 | Imp | Click |", "|---|---:|---:|---|---:|---:|"]
+    for r in c["keyword_pages"]:
+        if r["tier"] == "reference":
+            continue
+        shown = r["position"] is not None and r["impressions"]
+        pos = f"{r['position']:.1f}" if shown else "—（表示データなし）"
+        mark = {"順位上昇": "▲ ", "順位低下": "▼ "}.get(r.get("move") if shown else None, "")
+        out.append(f"| {r['market_label']} | {r.get('volume_label') or '-'} | {pos} | {mark}{r.get('delta_label') or '—'} | {r['impressions']} | {r['clicks']} |")
+    out += ["", "- ▲順位上昇／▼順位低下＝前週から2.0位以上の変化（1週分）。ページ別の分析と改善候補は⑥。", *(f"- {n}" for n in seo_notes)]
     return "\n".join(out) + "\n"
 
 
 def _aio_changes_md(aio: dict) -> str:
-    out = ["**前回の観測との比較**\n", "| キーワード | AIO生成 | TCDの引用 | TCDの会社推薦 | 観測日時（前回→今回） |", "|---|---|---|---|---|"]
-    for ch in aio["changes"]:
-        cells = []
-        for item in ("generated", "cited", "recommended"):
-            v = ch["items"][item]
-            change = f"**{v['change']}**" if v["direction"] == "lost" and item in ("cited", "recommended") else v["change"]
-            cells.append(f"{change}（前回 {v['prev']} → 今回 {v['cur']}）")
-        out.append(f"| {ch['market_label']} | {' | '.join(cells)} | {ch['previous_observed']} → {ch['current_observed']} |")
-    out += [""] + [f"- {n}" for n in aio.get("change_notes") or []]
-    return "\n".join(out) + "\n"
+    """⑤ 前回比較の補足（変化そのものは②にあるため繰り返さない）。"""
+    items = [*(aio.get("change_notes") or []), *(aio.get("comparison_supplements") or [])]
+    if not items:
+        return ""
+    return "**前回比較の補足（日次観測など）**\n\n" + "\n".join(f"- {n}" for n in items) + "\n"
 
 
 def _aio_md(c: dict) -> str:
     aio = c["aio"]
-    out = [f"{aio['summary']}。\n", _aio_changes_md(aio), "**今回の観測**\n",
-           "| キーワード | AIO | TCDの引用 | TCDの推薦 | 競合の推薦 | 引用ドメイン（今回の件数／前回からの増減） | TCDで最も表示されたページ |",
-           "|---|---|---|---|---|---|---|"]
+    out = [_aio_changes_md(aio), "**今回の観測（引用ドメイン・競合）**\n",
+           "| キーワード | 競合の推薦 | 引用ドメイン（今回の件数／前回からの増減） | TCDで最も表示されたページ |",
+           "|---|---|---|---|"]
     for r in aio["rows"]:
         comp_label = r["citation_count_label"]
         top = r["top_page"]
         top_label = f"{top['name']}（{_pos1(top['position'])}位）" if top else "—"
-        out.append(f"| {r['market_label']} | {r['aio_generated_label']} | {r['tcd_cited_label']} | {r['tcd_recommended_label']} "
-                   f"| {r['competitor_recommendation_label']} | {comp_label} | {_cell(top_label)} |")
+        out.append(f"| {r['market_label']} | {r['competitor_recommendation_label']} | {comp_label} | {_cell(top_label)} |")
     out.append("")
     for r in aio["rows"]:
         out.append(f"#### {r['market_label']}\n")
@@ -517,17 +551,14 @@ def _kw_page_md(p: dict) -> str:
 
 def _seo_content_md(c: dict, seo_notes: list[str]) -> str:
     out = ["**重点キーワードで表示されたページ**\n",
-           "| キーワード | 検索意図 | 平均順位（前週比） | 表示・クリック | 表示されたページ（上位3） | 評価 |",
-           "|---|---|---|---|---|---|"]
+           "| キーワード | 検索意図 | 表示されたページ（上位3。今週・前週） | 評価 |",
+           "|---|---|---|---|"]
     checks = []
     for r in c["keyword_pages"]:
         if r["tier"] == "reference":
             continue
-        shown = r["position"] is not None and r["impressions"]
-        pos = f"{r['position']:.1f}（{r['delta_label']}）" if shown else "—"
         pages = "、".join(_kw_page_md(p) for p in r["pages"][:3]) or "—"
-        out.append(f"| {r['market_label']} | {r['intent_label']} | {pos} | {r['impressions']}・{r['clicks']} | {_cell(pages)} "
-                   f"| {_cell(r['page_evaluation'])} |")
+        out.append(f"| {r['market_label']} | {r['intent_label']} | {_cell(pages)} | {_cell(r['page_evaluation'])} |")
         if r["movement"]:
             checks.append(f"\n**「{r['market_label']}」の順位変動（前週比・1週）**: このキーワードに一致したクエリでの、ページ別の表示（事実）\n")
             checks += [f"- {x}" for x in r["movement"]]
@@ -627,19 +658,28 @@ def render_markdown_content(vm: dict) -> str:
     c = vm["content"]
     parts = [f"# TCD週次SEO/AIOレポート（{periods['title']}）\n",
              f"{periods['header_note']} ／ データ品質: {header['data_quality_label']} ／ 継続週数: {header.get('weeks_available', '-')}週\n"]
-    parts.append("## ① 今週のSEO/AIO・コンテンツ評価\n")
+    seo_notes = [n.replace("改善・悪化の判定", "順位上昇・低下の判定") for n in vm["priority_markets"]["seo_notes"] + notes["seo"]]
+    su = vm["site_usage"]
+    parts.append(f"## ① サイト全体のアクセス状況{sec['site_usage']}\n")
+    parts.append("\n".join(_summary_md(su)) + "\n")
+    parts.append("\n".join([f"- カードの数値: GA4 {su['metric_label']}（人）。前週比は現行の集計条件どうしの比較。流入元・推移などの詳細は⑨。",
+                            *(f"- 異常値（原因未確認）: {a}" for a in su["anomaly_notes"])]) + "\n")
+    parts.append(f"## ② AIO引用状況{sec['aio']}\n")
+    parts.append(_aio_top_md(c))
+    parts.append(f"## ③ SEO検索順位{sec['seo']}\n")
+    parts.append(_seo_top_md(c, seo_notes))
+    parts.append("## ④ 今週のSEO/AIO・コンテンツ評価\n")
     parts.append(_lead_md(c))
-    parts.append(f"## ② AIO評価・競合比較{sec['aio']}\n")
+    parts.append(f"## ⑤ AIO詳細・競合比較{sec['aio']}\n")
     parts.append(_aio_md(c))
-    parts.append(f"## ③ SEO・コンテンツ評価{sec['seo']}\n")
-    parts.append(_seo_content_md(c, [n.replace("改善・悪化の判定", "順位上昇・低下の判定") for n in vm["priority_markets"]["seo_notes"] + notes["seo"]]))
-    parts.append("## ④ 実施施策と効果検証\n")
+    parts.append(f"## ⑥ SEO・コンテンツ改善候補{sec['seo']}\n")
+    parts.append(_seo_content_md(c, []))
+    parts.append("## ⑦ 実施施策と効果検証\n")
     parts.append(_initiatives_content_md(c))
-    parts.append(f"## ⑤ 問い合わせ実績{sec['inquiries']}\n")
+    parts.append(f"## ⑧ 問い合わせ実績{sec['inquiries']}\n")
     parts.append(_inquiry_dashboard_md(c))
-    parts.append(f"## ⑥ アクセスの詳細{sec['site_usage']}\n")
-    parts.append(_site_usage_section(vm["site_usage"]))
-    parts.append(_site_usage_v2(vm["site_usage"]))
+    parts.append(f"## ⑨ アクセスの詳細{sec['site_usage']}\n")
+    parts.append(_site_usage_v2(su))
     if notes["site_usage"]:
         parts.append("\n".join(f"- {n}" for n in notes["site_usage"]) + "\n")
 
