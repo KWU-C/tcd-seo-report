@@ -89,6 +89,15 @@ def _top_url_for_market(page_query_rows: list[dict], matcher) -> dict | None:
     return {"page_id_or_url": key, **metrics}
 
 
+def _page_breakdown(page_query_rows: list[dict], matcher, n: int = 3) -> list[dict]:
+    """キーワード（一致クエリの合算）で表示されたTCDのページ。表示回数の多い順に上位n件。
+    レポートの「キーワード→ページ」の対応（どのページが検索意図の受け皿になっているか）に使う。"""
+    matched = _matched_rows(page_query_rows, matcher)
+    grouped = group_metrics(matched, key_fn=lambda r: r.get("page_id") or r["normalized_url"])
+    ranked = top_n_by(grouped, n=n, sort_key="impressions")
+    return [{"page_id_or_url": key, **metrics} for key, metrics in ranked]
+
+
 def _judge_seo(current: dict, prv: dict, thresholds: dict, min_impressions: int) -> tuple[str, str, str, str, str | None]:
     """(severity, judgment, message, recommendation, shortfall) を返す。
     min_impressions: 市場ごとの最低Imp（market_min_impressions）。これ未満では順位の上昇・下降を判定しない。
@@ -163,6 +172,7 @@ def analyze_market(
     query_daily_cur = bundle["gsc"]["current"]["gsc_query_daily"]
     query_daily_prv = bundle["gsc"]["comparison"]["gsc_query_daily"]
     page_query_cur = bundle["gsc"]["current"]["gsc_page_query_daily"]
+    page_query_prv = (bundle["gsc"].get("comparison") or {}).get("gsc_page_query_daily") or []
     aio_by_query = {o["query"]: o for o in bundle.get("aio_observations", [])}
     prev_aio_by_query = {o["query"]: o for o in (previous_bundle or {}).get("aio_observations", [])}
 
@@ -184,6 +194,9 @@ def analyze_market(
         matched_query_variants = _matched_query_variants(matched_cur)
 
         top_url = _top_url_for_market(page_query_cur, matcher)
+        page_breakdown = _page_breakdown(page_query_cur, matcher, n=5)
+        # 前週（比較期間）のページ別。順位変化の要因をページ×クエリで確認するために使う（今週の上位ページの前週値を引く）
+        page_breakdown_comparison = _page_breakdown(page_query_prv, matcher, n=10)
         # aio: false（参考クエリ）はAIO観測対象外。過去週の観測が残っていても使わない
         aio_obs = aio_by_query.get(representative_query) if m.get("aio", True) else None
 
@@ -232,6 +245,8 @@ def analyze_market(
             "current": current, "comparison": comparison,
             "matched_query_variants": matched_query_variants,
             "top_url": top_url,
+            "page_breakdown": page_breakdown,
+            "page_breakdown_comparison": page_breakdown_comparison,
             "aio": aio_obs,
             # 表示・集計用の引用元（引用順・重複除去・Google内部リンク除外）。元データは aio.cited_domains に保持
             "aio_citations": {"status": cite_status, "domains": normalize.competitor_domains(aio_obs),

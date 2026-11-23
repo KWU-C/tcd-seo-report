@@ -106,7 +106,7 @@ def test_rise_beyond_control_is_possible_effect(tmp_path):
     item, sd = _item(target=lambda d, pre: ((100 if pre else 160) + rng.randint(-5, 5), (3 if pre else 6)),
                      site=lambda d: (10000 + rng.randint(-300, 300), 200))
     f = initiatives.analyze_initiatives(_md(tmp_path, MD_COUNTS), _bundle("内部リンク施策", item, sd), [], THRESHOLDS)[0]
-    assert f["judgment"] == "比較対照と異なる増加（原因未確定）"
+    assert f["judgment"] == "比較対照を上回る変化（原因未確定）"
     assert "施策の効果とは断定していない" in f["recommendation"]
     assert "原因（施策・検索クエリの構成・同時期の変更・季節要因など）は確定していない" in f["message"]
 
@@ -157,7 +157,8 @@ def test_view_model_shows_elapsed_days_and_periods(tmp_path):
     f = initiatives.analyze_initiatives(_md(tmp_path, MD_CTR), _bundle("メタ施策", item, sd), [], THRESHOLDS)[0]
     v = view_model._initiative_view({**f, "display_message": f["message"]})
     assert v["elapsed_label"] == "実装日 10/2(金) から42日（Search Consoleの確定済み最新日 11/13(金) まで）"
-    assert "実装前 9/4(金)〜10/1(木) と 実装後 10/17(土)〜11/13(金)（各28日" in v["period_label"]
+    assert "実装前28日間 9/4(金)〜10/1(木) と 直近28日間 10/17(土)〜11/13(金)" in v["period_label"]
+    assert "実装後の初期期間 10/3(土)〜10/16(金) は含まない" in v["period_label"]
     assert [r["label"] for r in v["metrics_rows"]] == ["表示回数", "クリック数", "クリック率", "平均掲載順位（参考・小さいほど上位）"]
 
 
@@ -177,7 +178,7 @@ def test_adverse_label_is_hedged(tmp_path):
     item, sd = _item(target=lambda d, pre: ((160 if pre else 100) + rng.randint(-5, 5), (6 if pre else 3)),
                      site=lambda d: (10000 + rng.randint(-300, 300), 200))
     f = initiatives.analyze_initiatives(_md(tmp_path, MD_COUNTS), _bundle("内部リンク施策", item, sd), [], THRESHOLDS)[0]
-    assert f["judgment"] == "比較対照と異なる減少（原因未確定）" and f["severity"] == "info"
+    assert f["judgment"] == "比較対照を下回る変化（原因未確定）" and f["severity"] == "info"
     assert "施策の悪影響とは判断していない" in f["message"]
     assert "表示回数（対象 " in f["message"] and "比較対照 " in f["message"]
     for word in ("悪化", "逆効果", "失敗"):
