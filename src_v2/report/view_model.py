@@ -26,6 +26,7 @@ import re
 from datetime import date, timedelta
 
 from src_v2 import config_loader
+from src_v2.report import content_eval
 
 _SEVERITY_RANK = {"critical": 0, "warning": 1, "info": 2}
 _CONFIDENCE_RANK = {"High": 0, "Medium": 1, "Low": 2, "Not assessable": 3}
@@ -748,7 +749,9 @@ def _build_category_page_trends(page_findings: list[dict], thresholds_cfg: dict,
 
 # ── ⑤ 施策評価 ──────────────────────────────────────────────────
 
-_INITIATIVE_ORDER = {"比較対照と異なる減少（原因未確定）": 0, "比較対照と異なる増加（原因未確定）": 1,
+_INITIATIVE_ORDER = {"比較対照を下回る変化（原因未確定）": 0, "比較対照を上回る変化（原因未確定）": 1,
+                     "指標で比較対照との差の向きが異なる（原因未確定）": 2,
+                     "比較対照と異なる減少（原因未確定）": 0, "比較対照と異なる増加（原因未確定）": 1,
                      "指標で方向が異なる（原因未確定）": 2, "数値の変化のみ": 3, "効果確認待ち": 4, "評価不能": 5,
                      "検索流入の前後比較の対象外": 6, "評価対象未設定": 7}
 
@@ -784,9 +787,13 @@ def _initiative_view(f: dict) -> dict:
     if ev.get("implemented_at") and ev.get("gsc_end") and windows:
         view["elapsed_label"] = (f"実装日 {_md(ev['implemented_at'])} から{windows['elapsed_days']}日"
                                  f"（Search Consoleの確定済み最新日 {_md(ev['gsc_end'])} まで）")
-        view["period_label"] = (f"実装前 {_md(windows['pre']['start'])}〜{_md(windows['pre']['end'])} と "
-                                f"実装後 {_md(windows['post']['start'])}〜{_md(windows['post']['end'])}（各{windows['days']}日。"
-                                f"実装日 {_md(windows['excluded_day'])} は公開前後が混ざるため除く）")
+        # 直近28日を使う施策は、実装後の初期期間を含まない（単純な実装直後との前後比較ではない）ことを明記する
+        w = content_eval.comparison_window(ev)
+        excluded = (f"実装後の初期期間 {_md(w['excluded']['start'])}〜{_md(w['excluded']['end'])} は含まない"
+                    if w and w["excluded"] else "実装日の翌日からの期間")
+        view["period_label"] = (f"実装前{windows['days']}日間 {_md(windows['pre']['start'])}〜{_md(windows['pre']['end'])} と "
+                                f"直近{windows['days']}日間 {_md(windows['post']['start'])}〜{_md(windows['post']['end'])}。"
+                                f"実装日 {_md(windows['excluded_day'])} は公開前後が混ざるため除く。{excluded}")
     if ev.get("metrics"):
         pre, post = ev["metrics"]["pre"], ev["metrics"]["post"]
         cpre, cpost = (ev.get("control") or {}).get("pre"), (ev.get("control") or {}).get("post")
@@ -811,11 +818,12 @@ def _initiative_view(f: dict) -> dict:
 
 
 INITIATIVE_NOTES = [
-    "実装前と実装後の同じ日数（最大28日。実装日当日は除く）を比べる。今週と先週の比較では施策を評価しない。",
+    "実装前28日間と直近28日間を比べる（実装後が28日未満の間は実装前後の同じ日数。実装日当日は除く）。実装から28日を超えた施策では、"
+    "実装後の初期期間を含まないため、単純な実装直後との前後比較ではない。今週と先週の比較では施策を評価しない。",
     "「数値の変化」は対象ページの値そのもの。「比較対照の変化」は同じ期間の対象ページ以外（サイト全体−対象ページ）の変化で、"
     "季節・曜日・サイト全体の増減など、施策以外の要因の目安。",
-    "判定は観測した事実の分類で、因果関係の判定ではない。「比較対照と異なる増加／減少（原因未確定）」は、対象ページの変化が"
-    "比較対照の変化と日々の変動では説明しにくいことを示すだけで、施策の効果・悪影響とは判断していない（原因の確認は担当者）。"
+    "判定は観測した事実の分類で、因果関係の判定ではない。「比較対照を上回る／下回る変化（原因未確定）」は、対象ページの変化が"
+    "比較対照の変化と日々の変動では説明しにくいことを示すだけで（「下回る」は対象ページの値が減ったことを意味しない）、施策の効果・悪影響とは判断していない（原因の確認は担当者）。"
     "固定の増減率や順位で成功・失敗を決めない。",
     "表示回数・クリック数が少ない指標（実装前・実装後のどちらかが表示回数50未満・クリック5未満）は、日々の変動と区別できないため評価しない。",
     "平均掲載順位は数値が小さいほど上位。検索クエリの構成で変わるため判定に使わず、参考として示す（比較対照の平均掲載順位は計算しない）。",
@@ -1195,7 +1203,35 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_c
         },
     }
 
+    # SEO/AIO・コンテンツ評価中心の構成（2026-11-23 再設計）。現行方式（レポート週・新しいアクセス集計）の週だけ
+    layout = "legacy"
+    content = None
+    if periods["scheme"] == "weekly" and site_usage.get("scheme") == "v2":
+        layout = "content"
+        page_evals = content_eval.build_page_evaluations(
+            page_findings, initiative_findings, priority_markets["table"], market_findings, thresholds_cfg)
+        keyword_pages = content_eval.build_keyword_pages(priority_markets["table"], market_findings, page_findings,
+                                                        thresholds_cfg["low_data"]["position_change_meaningful"])
+        aio_eval = content_eval.build_aio_evaluation(keyword_pages, competitor_findings, market_findings)
+        initiative_summary = content_eval.build_initiative_summary(
+            initiative_findings, (thresholds_cfg.get("initiative_review") or {}).get("significance_t", 2.0))
+        inquiry_dashboard = content_eval.build_inquiry_dashboard(inquiries)
+        content = {
+            "lead": content_eval.build_lead(keyword_pages, page_evals, aio_eval, initiative_summary,
+                                            inquiry_dashboard, site_usage),
+            "aio": aio_eval,
+            "keyword_pages": keyword_pages,
+            "pages": page_evals,
+            "regional_lps": content_eval.build_regional_lp_summary(page_evals),
+            "page_status_order": content_eval.STATUS_ORDER,
+            "status_rules": content_eval.STATUS_RULES,
+            "initiatives": initiative_summary,
+            "inquiry_dashboard": inquiry_dashboard,
+        }
+
     return {
+        "layout": layout,
+        "content": content,
         "schema_version": analysis["schema_version"],
         "generated_at": analysis["generated_at"],
         "header": header,

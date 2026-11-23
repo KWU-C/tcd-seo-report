@@ -46,9 +46,15 @@ VERDICT_NOT_SET = "評価対象未設定"
 VERDICT_OTHER_METHOD = "検索流入の前後比較の対象外"
 VERDICT_WAITING = "効果確認待ち"
 VERDICT_CHANGE_ONLY = "数値の変化のみ"
-VERDICT_POSSIBLE = "比較対照と異なる増加（原因未確定）"
-VERDICT_ADVERSE = "比較対照と異なる減少（原因未確定）"
-VERDICT_MIXED = "指標で方向が異なる（原因未確定）"
+# 2026-11-23 文言変更: 対象ページの値が増えていても、比較対照の増加率を下回れば旧「異なる減少」になり、
+# 減少と誤読されるため、「比較対照を上回る／下回る」に改めた（判定の基準・検定は変えていない）
+VERDICT_POSSIBLE = "比較対照を上回る変化（原因未確定）"
+VERDICT_ADVERSE = "比較対照を下回る変化（原因未確定）"
+VERDICT_MIXED = "指標で比較対照との差の向きが異なる（原因未確定）"
+# 2026-11-23 より前の analysis.json に残る旧文言 → 新文言
+LEGACY_VERDICTS = {"比較対照と異なる増加（原因未確定）": VERDICT_POSSIBLE,
+                   "比較対照と異なる減少（原因未確定）": VERDICT_ADVERSE,
+                   "指標で方向が異なる（原因未確定）": VERDICT_MIXED}
 ALL_VERDICTS = (VERDICT_NOT_ASSESSABLE, VERDICT_NOT_SET, VERDICT_OTHER_METHOD, VERDICT_WAITING, VERDICT_CHANGE_ONLY,
                 VERDICT_POSSIBLE, VERDICT_ADVERSE, VERDICT_MIXED)
 
@@ -291,17 +297,25 @@ def _verdict(primary: str, tests: dict, t_crit: float, metrics: dict | None = No
     def obs(ms):
         return "・".join(_observation(m, tests, metrics, control) if metrics and control else METRIC_NAMES[m] for m in ms)
 
+    def own(ms):
+        """比較対照を下回った指標のうち、対象ページの値そのものは増えているもの（「減少」と読まれないよう明記する）。"""
+        if not (metrics and control):
+            return ""
+        grew = [METRIC_NAMES[m] for m in ms if (metrics["post"].get(m) or 0) > (metrics["pre"].get(m) or 0)]
+        return f"（{'・'.join(grew)}は対象ページでも増加しており、減少ではない）" if grew else ""
+
     cause = "原因（施策・検索クエリの構成・同時期の変更・季節要因など）は確定していない"
     if not assessable:
         return VERDICT_NOT_ASSESSABLE, reasons
     if up and down:
-        return VERDICT_MIXED, reasons + [f"{obs(up)}は比較対照より増え、{obs(down)}は比較対照より減った。{cause}"]
+        return VERDICT_MIXED, reasons + [
+            f"{obs(up)}は比較対照を上回り、{obs(down)}は比較対照を下回った{own(down)}。{cause}"]
     if up:
         return VERDICT_POSSIBLE, reasons + [
-            f"{obs(up)}で、対象ページの変化が比較対照と異なり、日々の変動の範囲を超えている。{cause}"]
+            f"{obs(up)}で、対象ページの変化が比較対照を上回り、差は日々の変動の範囲を超えている。{cause}"]
     if down:
         return VERDICT_ADVERSE, reasons + [
-            f"{obs(down)}で、対象ページの変化が比較対照と異なり、日々の変動の範囲を超えている。"
+            f"{obs(down)}で、対象ページの変化が比較対照を下回り、差は日々の変動の範囲を超えている{own(down)}。"
             f"{cause}。施策の悪影響とは判断していない"]
     return VERDICT_CHANGE_ONLY, reasons + [
         "対象ページの変化は、同じ期間の対象ページ以外の変化と日々の変動で説明できる範囲（施策の効果とは判断しない）"]

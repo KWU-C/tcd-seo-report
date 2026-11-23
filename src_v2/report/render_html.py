@@ -87,14 +87,14 @@ def _n(v) -> str:
     return "-" if v is None else f"{v:,}"
 
 
-def _table_html(head: list[str], rows: list[list[str]], num_from: int = 1) -> str:
+def _table_html(head: list[str], rows: list[list[str]], num_from: int = 1, extra_class: str = "") -> str:
     def cls(i: int) -> str:
         return ' class="num"' if i >= num_from else ""
     th = "".join(f"<th{cls(i)}>{escape(h)}</th>" for i, h in enumerate(head))
     body = "".join("<tr>" + "".join(f"<td{cls(i)}>{c}</td>" for i, c in enumerate(r)) + "</tr>" for r in rows)
     # 狭い画面（スマートフォン）では表だけを横にスクロールさせる（ページ全体をはみ出させない）
     return (f'<div class="table-scroll" style="overflow-x:auto;-webkit-overflow-scrolling:touch">'
-            f'<table class="pages-table market-table"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>')
+            f'<table class="pages-table market-table{(" " + extra_class) if extra_class else ""}"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>')
 
 
 def _site_usage_v2_html(su: dict) -> str:
@@ -776,6 +776,8 @@ _STYLE = """
 
 
 def render_html(vm: dict) -> str:
+    if vm.get("layout") == "content":
+        return render_html_content(vm)
     header = vm["header"]
     periods = header["periods"]
     sec = periods["sections"]
@@ -835,4 +837,302 @@ def render_html(vm: dict) -> str:
         f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         f"<title>TCD週次SEO/AIOレポート {escape(periods['title'].replace(' ', ''))}</title>"
         f"{_STYLE}</head><body>{body}</body></html>"
+    )
+
+
+# ══ SEO/AIO・コンテンツ評価中心の構成（2026-11-23 再設計、vm["layout"] == "content"） ══
+
+def _p1(v) -> str:
+    return "—" if v is None else f"{v:.1f}"
+
+
+def _pct1(v) -> str:
+    return "—" if v is None else f"{v * 100:.1f}%"
+
+
+def _page_name_html(p: dict) -> str:
+    return f'{escape(p["short_title"])}<span class="cell-note">{escape(p["path"])}</span>'
+
+
+def _points_html(points: list[str]) -> str:
+    return '<ul class="fact-list">' + "".join(f"<li>{escape(x)}</li>" for x in points) + "</ul>" if points else "—"
+
+
+def _eval_card_html(p: dict, with_points: bool) -> str:
+    rows = [("事実（前週→今週）", escape(p["facts"])), ("評価", escape(p["evaluation"]))]
+    if with_points and p["points"]:
+        rows.append(("確認すべき論点（未確認）", _points_html(p["points"])))
+    rows.append(("次の対応", escape(p["next_action"])))
+    if p["notes"]:
+        rows.append(("関連する施策", escape(p["notes"][0])))
+    body = "".join(f'<div class="kv"><span class="k">{escape(k)}</span><span class="v">{v}</span></div>' for k, v in rows)
+    return (f'<div class="query-card eval-card"><div class="card-head">{_status_chip(p["status"], p["state"])}'
+            f'<span class="tag">{escape(p["intent_label"])}</span></div>'
+            f'<h4 class="card-title">{escape(p["short_title"])}</h4><div class="match-condition">{escape(p["path"])}</div>{body}</div>')
+
+
+def _lead_html(c: dict) -> str:
+    lead = c["lead"]
+    html = ['<h3>最重要の変化</h3><ul class="highlights">'
+            + "".join(f"<li>{_highlight_aio_cited(h)}</li>" for h in lead["headline"]) + "</ul>"]
+    html.append("<h3>前週比で順位が上昇したコンテンツ</h3>")
+    html.append('<div class="card-grid">' + "".join(_eval_card_html(p, False) for p in lead["progressed"]) + "</div>"
+                if lead["progressed"] else '<p class="empty">該当なし</p>')
+    html.append("<h3>確認が必要なコンテンツ（改善候補）</h3>")
+    html.append('<div class="card-grid">' + "".join(_eval_card_html(p, True) for p in lead["candidates"]) + "</div>"
+                if lead["candidates"] else '<p class="empty">該当なし</p>')
+    notes = []
+    if lead["thin_candidates"]:
+        names = "、".join(f"「{p['short_title']}」" for p in lead["thin_candidates"])
+        notes.append(f"評価材料不足（表示が週50回未満）のサービス・地域・比較ページ{len(lead['thin_candidates'])}件も改善候補に含める: "
+                     f"{names}。順位・クリックの変化は評価していない（③・Appendix）。")
+    notes.append("順位の上昇・低下は前週比（1週分）の順位変動で、施策の効果判定ではない（施策は④で実装前後を比較対照と比べる）。"
+                 "「確認すべき論点」は未確認の問いで、原因を判断したものではない。")
+    html.append(_notes_html(notes))
+    if lead["kpi_line"]:
+        html.append(f'<p class="kpi-line"><span class="tag">結果指標（参考）</span>{escape(lead["kpi_line"])}（詳細は⑤・⑥）</p>')
+    return "".join(html)
+
+
+def _aio_content_html(c: dict) -> str:
+    aio = c["aio"]
+    rows = []
+    for r in aio["rows"]:
+        top = r["top_page"]
+        cited = (f'<strong style="{_AIO_CITED_STYLE}">あり</strong>' if r["tcd_cited"] else escape(r["tcd_cited_label"]))
+        rec = (f'<strong style="{_AIO_CITED_STYLE}">あり</strong>' if r["tcd_recommended_label"] == "あり"
+               else escape(r["tcd_recommended_label"]))
+        rows.append([escape(r["market_label"]), escape(r["aio_generated_label"]), cited, rec,
+                     escape(r["competitor_recommendation_label"]),
+                     escape(r["citation_count_label"]),
+                     (f"{escape(top['name'])}<span class='cell-note'>{_p1(top['position'])}位・表示{top['impressions']}</span>" if top else "—")])
+    html = [f'<p class="lede-line">{_highlight_aio_cited(aio["summary"])}。</p>',
+            _table_html(["キーワード", "AIO", "TCDの引用", "TCDの推薦", "競合の推薦", "引用ドメイン", "TCDで最も表示されたページ"],
+                        rows, num_from=99, extra_class="content-table")]
+    cards = []
+    for r in aio["rows"]:
+        facts = "".join(f"<li>{escape(x)}</li>" for x in r["facts"])
+        pts = "".join(f"<li>{escape(x)}</li>" for x in r["points"])
+        cards.append(f'<div class="query-card"><h4 class="card-title">{escape(r["market_label"])}</h4>'
+                     f'<div class="sub-head">観測事実</div><ul class="fact-list">{facts}</ul>'
+                     + (f'<div class="sub-head">確認する論点（未検証）</div><ul class="fact-list guess">{pts}</ul>' if pts else "")
+                     + f'<div class="judgment-line">次の対応: {escape(r["next_action"])}</div></div>')
+    html.append('<div class="card-grid">' + "".join(cards) + "</div>")
+    notes = []
+    if aio["cross_domains"]:
+        notes.append("複数キーワードで引用されたドメイン: " + "、".join(f"{d}（{'・'.join(qs)}）" for d, qs in aio["cross_domains"].items()))
+    html.append(_notes_html(notes + aio["notes"]))
+    return "".join(html)
+
+
+def _kw_page_html(p: dict) -> str:
+    prev = (f"前週{p['prev_impressions']}回・{_p1(p['prev_position'])}位" if p.get("prev_impressions") is not None else "前週表示なし")
+    return f"<div>{escape(p['name'])}<span class='cell-note'>今週{p['impressions']}回・{_p1(p['position'])}位（{prev}）</span></div>"
+
+
+def _seo_content_html(c: dict, seo_notes: list[str]) -> str:
+    krows, checks = [], []
+    for r in c["keyword_pages"]:
+        if r["tier"] == "reference":
+            continue
+        shown = r["position"] is not None and r["impressions"]
+        pos = (f"<span class='rank-value'>{r['position']:.1f}</span><span class='cell-note'>{escape(r['delta_label'])}</span>"
+               if shown else "—")
+        pages = "".join(_kw_page_html(p) for p in r["pages"][:3]) or "—"
+        krows.append([escape(r["market_label"]), escape(r["intent_label"]), pos,
+                      f"{r['impressions']}／{r['clicks']}", pages, escape(r["page_evaluation"] or "—")])
+        if r["movement"]:
+            checks.append(f'<div class="query-card"><h4 class="card-title">「{escape(r["market_label"])}」の順位変動（前週比・1週）</h4>'
+                          '<div class="sub-head">このキーワードに一致したクエリでの、ページ別の表示（事実）</div>'
+                          + _points_html(r["movement"])
+                          + '<div class="judgment-line">次の対応: ページ×クエリで、どのクエリ・どのページの順位が変わったかを確認する。'
+                            '1週の変化のため、これだけで改修は決めない</div></div>')
+        if r["investigate"]:
+            checks.append(f'<div class="query-card"><h4 class="card-title">調査対象: 「{escape(r["market_label"])}」</h4>'
+                          f'<div class="sub-head">事実</div><ul class="fact-list"><li>{escape(r["page_evaluation"])}</li></ul>'
+                          f'<div class="judgment-line">次の対応: {escape(r["investigate"])}</div></div>')
+    html = ["<h3>重点キーワードで表示されたページ</h3>",
+            _table_html(["キーワード", "検索意図", "平均順位", "表示／クリック", "表示されたページ（上位3）", "評価"], krows, num_from=99, extra_class="content-table")]
+    if checks:
+        html.append('<div class="card-grid">' + "".join(checks) + "</div>")
+    lrows = [[_status_chip(p["status"], p["state"]), _page_name_html(p), f"{_p1(p['prev_position'])}→{_p1(p['position'])}",
+              f"{p['prev_impressions']:,}→{p['impressions']:,}", f"{p['prev_clicks']}→{p['clicks']}",
+              f"{_pct1(p['prev_ctr'])}→{_pct1(p['ctr'])}", escape("、".join(p["top_queries"]) or "—")] for p in c["regional_lps"]]
+    if lrows:
+        html += ["<h3>地域LPの検索実績（全クエリの合計）</h3>",
+                 _table_html(["区分", "ページ", "順位（前週→今週）", "表示", "クリック", "CTR", "主要クエリ（上位3）"], lrows, num_from=99, extra_class="content-table"),
+                 _notes_html(["上の表の「重点キーワード」の値は、そのキーワードに一致するクエリだけの集計。この表は地域LPに表示された全クエリの合計で、両者は一致しない。"])]
+    prows = []
+    for p in c["pages"]:
+        if p["status"] == "評価材料不足":
+            continue
+        ev = escape(p["evaluation"])
+        if p["points"]:
+            ev += "<span class='cell-note'>論点: " + escape("／".join(p["points"])) + "</span>"
+        ev += f"<span class='cell-note'>次: {escape(p['next_action'])}</span>"
+        prows.append([_status_chip(p["status"], p["state"]), _page_name_html(p), escape(p["intent_label"]),
+                      escape(p["top_query"] or "—"), f"{_p1(p['prev_position'])}→{_p1(p['position'])}",
+                      f"{p['impressions']:,}", str(p["clicks"]), _pct1(p["ctr"]), ev])
+    thin = [p for p in c["pages"] if p["status"] == "評価材料不足"]
+    html += ["<h3>ページ別の評価</h3>",
+             '<p class="note">監視対象ページのうち、表示回数が今週・前週とも50以上のページ。</p>',
+             _table_html(["区分", "ページ", "検索意図", "主要クエリ", "順位（前週→今週）", "表示", "クリック", "CTR", "評価・確認すべき論点・次の対応"],
+                         prows, num_from=99, extra_class="content-table"),
+             _notes_html([f"評価材料不足（表示50回未満の週がある）{len(thin)}件は、変化を評価せずAppendixの「ページ別評価（全件）」に掲載。"
+                          "サービス・地域・比較ページは改善候補として①にも挙げる。",
+                          c["status_rules"], "順位・表示・CTR・クリックは判断材料で、増減だけで良否を決めない。", *seo_notes])]
+    return "".join(html)
+
+
+def _metric_table_html(lines: list[dict]) -> str:
+    ref = "<span class='cell-note'>参考</span>"
+    rows = "".join(f"<tr><td>{escape(x['label'])}{'' if x['judged'] else ref}</td>"
+                   f"<td>{escape(x['target'])}</td><td>{escape(x['control'])}</td><td>{escape(x['diff'])}</td></tr>" for x in lines)
+    return ('<table class="mini-table"><thead><tr><th>指標</th><th>対象ページ（実装前→直近）</th><th>比較対照</th>'
+            f'<th>比較対照との差</th></tr></thead><tbody>{rows}</tbody></table>')
+
+
+def _initiatives_content_html(c: dict) -> str:
+    ini = c["initiatives"]
+    cnt = ini["counts"]
+    cards = []
+    for r in ini["rows"]:
+        ids = "".join(f"<li>{escape(i['name'])}<span class='cell-note'>{escape(i['id'])}・{escape(i['verdict'] or '—')}</span></li>"
+                      for i in r["items"])
+        title = escape("／".join(r["names"]))
+        body = [f'<div class="card-head">{_status_chip(r["class"], r["state"])}<span class="tag">{escape(r["verdict_short"])}</span></div>',
+                f'<h4 class="card-title">{title}</h4>',
+                f'<div class="kv"><span class="k">実装日</span><span class="v">{escape(r["implemented_at"] or "—")}'
+                + (f"（対象{r['url_count']}ページ）" if r["url_count"] else "") + "</span></div>",
+                f'<div class="kv"><span class="k">改修内容・仮説</span><span class="v">{escape(r["hypothesis"] or "—")}</span></div>']
+        if r["merged"]:
+            body.append(f'<div class="kv"><span class="k">施策（個別）</span><span class="v"><ul class="fact-list">{ids}</ul>'
+                        "<span class='cell-note'>対象ページ・実装日・判定・数値がすべて同じため表示上まとめた</span></span></div>")
+        if r["window"]:
+            body.append(f'<div class="kv"><span class="k">比較期間</span><span class="v">{escape(r["window"]["label"])}'
+                        f'<span class="cell-note">{escape(r["window"]["note"])}</span></span></div>')
+        if r["metric_lines"]:
+            body.append(_metric_table_html(r["metric_lines"]))
+        elif r["reason"]:
+            body.append(f'<div class="kv"><span class="k">評価しない理由</span><span class="v">{escape(r["reason"])}</span></div>')
+        if r["overlaps"]:
+            body.append(f'<div class="kv"><span class="k">重なる施策</span><span class="v">{escape("・".join(r["overlaps"]))}</span></div>')
+        body.append(f'<div class="judgment-line">次に確認すること: {escape(r["next_action"] or "—")}</div>')
+        cards.append(f'<div class="query-card eval-card initiative-card">{"".join(body)}</div>')
+    return (f'<p class="lede-line">施策{ini["item_count"]}件（表示{len(ini["rows"])}行）: 評価可能 {cnt["評価可能"]}・要調査 {cnt["要調査"]}・評価保留 {cnt["評価保留"]}</p>'
+            + '<div class="initiative-list">' + "".join(cards) + "</div>" + _notes_html(ini["notes"]))
+
+
+def _inquiry_dashboard_html(c: dict) -> str:
+    d = c["inquiry_dashboard"]
+    tiles = []
+    for t in d["tiles"]:
+        cur = "未集計" if t["current"] is None else f"{t['current']:,}"
+        cum = escape(inquiry_cumulative_label(d["cumulative"], t["cumulative_4w"]))
+        cls = " stat-tile-primary" if t["primary"] else ""
+        tiles.append(f'<div class="stat-tile{cls}"><div class="stat-label">{escape(t["label"])}</div>'
+                     f'<div class="stat-value-num">{cur}</div><div class="stat-sub">直近4週 {cum}</div></div>')
+    return (f'<div class="stat-row stat-row-5">{"".join(tiles)}</div>'
+            + _notes_html([d["status_line"] + "。案件相談は週ごとの変動が大きいため、評価には累計を使う。",
+                           *(f"集計の警告: {w}" for w in d["warnings"])]))
+
+
+def _appendix_pages_all_html(c: dict) -> str:
+    rows = [[_status_chip(p["status"], p["state"]), _page_name_html(p), escape(p["intent_label"]),
+             escape("、".join(p["top_queries"]) or "—"), f"{_p1(p['prev_position'])}→{_p1(p['position'])}",
+             f"{p['prev_impressions']:,}→{p['impressions']:,}", f"{p['prev_clicks']}→{p['clicks']}", escape(p["evaluation"])]
+            for p in c["pages"]]
+    return _table_html(["区分", "ページ", "検索意図", "主要クエリ（上位3）", "順位", "表示", "クリック", "評価"], rows, num_from=99, extra_class="content-table")
+
+
+_CONTENT_STYLE = """
+  .stat-row-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  @media (max-width: 640px) { .stat-row-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .stat-tile-primary { border: 2px solid var(--text-primary); }
+  .eval-card .card-head { display: flex; gap: .5rem; align-items: center; margin-bottom: .3rem; }
+  .eval-card .kv { display: grid; grid-template-columns: 7.5em 1fr; gap: .5rem; font-size: .8rem; padding: .25rem 0; border-top: 1px solid var(--gridline); }
+  .eval-card .k { color: var(--text-muted); }
+  .sub-head { font-size: .74rem; color: var(--text-muted); font-weight: 600; margin-top: .6rem; }
+  ul.fact-list { margin: .2rem 0 .4rem; padding-left: 1.1rem; font-size: .8rem; }
+  ul.fact-list.guess { color: var(--text-secondary); font-style: italic; }
+  .lede-line { font-weight: 600; margin: 0 0 .6rem; }
+  table.content-table th { white-space: nowrap; }
+  table.content-table td.nowrap { white-space: nowrap; }
+  .initiative-list { display: grid; gap: .8rem; }
+  table.mini-table { width: 100%; border-collapse: collapse; font-size: .78rem; margin: .4rem 0; }
+  table.mini-table th, table.mini-table td { text-align: left; padding: .25rem .4rem; border-top: 1px solid var(--gridline); vertical-align: top; }
+  table.mini-table th { color: var(--text-muted); font-weight: 600; white-space: nowrap; }
+  .eval-card .v ul.fact-list { margin: 0; }
+  .kpi-line { font-size: .8rem; color: var(--text-secondary); border-top: 1px solid var(--gridline); padding-top: .6rem; margin-top: .8rem; }
+"""
+
+
+def render_html_content(vm: dict) -> str:
+    header = vm["header"]
+    periods = header["periods"]
+    sec = periods["sections"]
+    notes = periods["notes"]
+    c = vm["content"]
+    appendix = vm["appendix"]
+    initiatives_title, initiatives_html = _initiatives_html(appendix)
+    body = f"""
+<div class="report-root">
+<h1>TCD週次SEO/AIOレポート（{escape(periods['title'])}）</h1>
+<p class="note">{escape(periods['header_note'])} ／ データ品質: {escape(header['data_quality_label'])} ／ 継続週数: {escape(str(header.get('weeks_available', '-')))}週</p>
+
+<section class="executive-summary">
+  <h2>① 今週のSEO/AIO・コンテンツ評価</h2>
+  {_lead_html(c)}
+</section>
+
+<section>
+  <h2>② AIO評価・競合比較{escape(sec['aio'])}</h2>
+  {_aio_content_html(c)}
+</section>
+
+<section>
+  <h2>③ SEO・コンテンツ評価{escape(sec['seo'])}</h2>
+  {_seo_content_html(c, [n.replace("改善・悪化の判定", "順位上昇・低下の判定") for n in vm["priority_markets"]["seo_notes"] + notes["seo"]])}
+</section>
+
+<section>
+  <h2>④ 実施施策と効果検証</h2>
+  {_initiatives_content_html(c)}
+</section>
+
+<section>
+  <h2>⑤ 問い合わせ実績{escape(sec['inquiries'])}</h2>
+  {_inquiry_dashboard_html(c)}
+</section>
+
+<section>
+  <h2>⑥ アクセスの詳細{escape(sec['site_usage'])}</h2>
+  {_site_usage_summary_html(vm["site_usage"])}
+  {_site_usage_v2_html(vm["site_usage"])}{_notes_html(notes["site_usage"]) if notes["site_usage"] else ""}
+</section>
+
+<section class="datastudio-link">
+  <a class="datastudio-button" href="https://datastudio.google.com/reporting/735a0062-1dd7-4e9b-9122-e6c308ad11f8/page/p_idoislic9d" target="_blank" rel="noopener">Data Studio で確認する →</a>
+</section>
+
+<details class="appendix">
+  <summary>Appendix　※クリックして表示</summary>
+  <h3>キーワード別詳細（クエリ内訳・AIO引用元・判定）</h3>
+  {_keyword_details_html(vm["priority_markets"])}
+  <h3>ページ別評価（全件・データ不足を含む）</h3>
+  {_appendix_pages_all_html(c)}
+  <h3>{escape(initiatives_title)}</h3>
+  {initiatives_html}
+  <h3>データ品質</h3>
+  {_appendix_data_quality_html(appendix["data_quality"])}
+  <h3>上位ランディングページ（/branding/、定点観測対象外）</h3>
+  {_appendix_landing_pages_html(appendix["landing_pages"])}
+</details>
+</div>
+"""
+    return (
+        f"<!doctype html><html lang=\"ja\"><head><meta charset=\"utf-8\">"
+        f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>TCD週次SEO/AIOレポート {escape(periods['title'].replace(' ', ''))}</title>"
+        f"{_STYLE.replace('</style>', _CONTENT_STYLE + '</style>')}</head><body>{body}</body></html>"
     )

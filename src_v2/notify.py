@@ -51,8 +51,8 @@ def collect_review_items(report_dir: Path) -> list[str]:
 
     items += [f"GA4 異常値（原因未確認）: {n}" for n in (report.get("site_usage") or {}).get("anomaly_notes", [])]
     for item in ((report.get("appendix") or {}).get("initiatives") or {}).get("items", []):
-        if item.get("verdict") == "比較対照と異なる減少（原因未確定）":
-            items.append(f"施策の効果確認: 「{item.get('name')}」で比較対照と異なる減少を観測（原因未確定。Appendix）")
+        if item.get("verdict") in ("比較対照を下回る変化（原因未確定）", "比較対照と異なる減少（原因未確定）"):
+            items.append(f"施策の効果確認: 「{item.get('name')}」で比較対照を下回る変化を観測（原因未確定。Appendix）")
     for seg in (report.get("site_usage") or {}).get("segments", []):
         if seg.get("error"):
             items.append(f"GA4: {seg.get('label')} の取得に失敗（{seg['error'][:120]}）")
