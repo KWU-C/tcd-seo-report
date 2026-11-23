@@ -204,12 +204,21 @@ def _evaluate_page(f: dict, thresholds_cfg: dict, initiatives: list[dict], keywo
         status = STATUS_STABLE
         evaluation = f"1ページ目（平均{_pos(pos)}位）で順位安定。クリック{clicks}"
         action = "継続観測"
+    if objective == "regional" and status in (STATUS_STABLE, STATUS_FLAT_LOW):
+        # 地域LPの全クエリ平均は、社名など地域名を含まない検索語も含む。地域キーワードでの評価（③・⑥）と混同しない
+        region = next((w for w in _REGION_WORDS.values() if w in (ev.get("title") or "")), None)
+        no_region = bool(region) and bool(top_queries) and not any(region in (q.get("query") or "").replace(" ", "")
+                                                                  for q in top_queries[:3])
+        evaluation = f"全クエリ平均順位は横ばい（平均{_pos(pos)}位）。ただし地域キーワードでの評価は別途確認（③・⑥）"
+        if no_region:
+            evaluation += f"。主要クエリ（上位3）は「{region}」を含まない検索語（社名など）"
+        action = "地域キーワード（③・⑥）での表示ページと順位で評価する"
 
     related = [i for i in initiatives if i.get("implemented_at")]
     notes = []
     if related:
         names = "・".join(f"「{i['name']}」" for i in related)
-        notes.append(f"施策{names}の対象ページ。前週比の順位変動は施策の効果判定ではない（効果の確認は④）")
+        notes.append(f"施策{names}の対象ページ。前週比の順位変動は施策の効果判定ではない（効果の確認は⑦）")
     return {
         "id": f["id"], "title": ev.get("title") or ev.get("page_id"), "short_title": short_title(ev.get("title")),
         "page_id": ev.get("page_id"), "url": ev.get("url"), "path": _short_url(ev.get("url") or ""),
@@ -454,6 +463,18 @@ def aio_daily_note(daily: dict | None, query: str, current_observed_at: str | No
     return text
 
 
+def aio_comparison_supplements(changes: list[dict]) -> list[str]:
+    """②の一覧に出ない前回比較の補足（比較できなかった理由＝前回・今回の値）。変化そのものは②に載せるので繰り返さない。"""
+    names = {"generated": "AIO生成", "cited": "TCDの引用", "recommended": "TCDの会社推薦"}
+    out = []
+    for c in changes:
+        for item, v in c["items"].items():
+            if v["change"].startswith("前回比較不可"):
+                reason = "前回の観測データなし" if not c["previous_available"] else f"前回 {v['prev']}・今回 {v['cur']}"
+                out.append(f"{c['market_label']}: {names[item]}は{reason}のため前回比較不可")
+    return out
+
+
 def aio_change_events(changes: list[dict]) -> list[dict]:
     """あり⇄なしの変化だけを、推薦・引用の消失を先頭にして並べる。"""
     events = []
@@ -623,7 +644,7 @@ def build_aio_evaluation(keyword_pages: list[dict], competitor_findings: list[di
         "1回の観測での変化を、恒常的な評価の低下・向上とは判断しない。",
     ]
     return {"rows": rows, "cross_domains": cross, "summary": summary, "notes": notes,
-            "changes": changes, "change_lines": lines,
+            "changes": changes, "change_lines": lines, "comparison_supplements": aio_comparison_supplements(changes),
             "change_notes": [f"{next(c['market_label'] for c in changes if c['query'] == q)}: {t}" for q, t in daily_notes.items()]}
 
 
@@ -748,7 +769,7 @@ def build_initiative_summary(initiative_findings: list[dict], t_crit: float = 2.
     notes = [
         "比較期間は「実装前28日間」と「直近28日間」（実装後の日数が28日未満の間は、実装前後の同じ日数）。"
         "実装から28日を超えた施策では、実装後の初期期間を含まないため、単純な実装直後との前後比較ではない。",
-        "それぞれの期間の変化を、同じ期間の対象ページ以外（比較対照）の変化と比べる。前週比の順位変動（①・③）は施策の効果判定に使わない。",
+        "それぞれの期間の変化を、同じ期間の対象ページ以外（比較対照）の変化と比べる。前週比の順位変動（③・⑥）は施策の効果判定に使わない。",
         "「比較対照を上回る／下回る」は、対象ページの変化と比較対照の変化の差が日々の変動の範囲を超えたことを示す。"
         "「下回る」は対象ページの値が減ったことを意味しない（増加率が比較対照より小さい場合を含む）。",
         "施策の効果と、検索順位・クリック数の変動との因果関係は判断していない。",
@@ -845,7 +866,7 @@ def build_lead(keyword_pages: list[dict], pages: list[dict], aio: dict, initiati
     for r in deal:
         if r.get("investigate"):
             pending.append(f"「{r['market_label']}」は地域LP以外のページが多く表示される理由が未確認のため、良否を判断しない")
-    pending.append(f"施策は効果・悪影響を判断できる段階にない（要調査{c['要調査']}・評価保留{c['評価保留']}、④）")
+    pending.append(f"施策は効果・悪影響を判断できる段階にない（要調査{c['要調査']}・評価保留{c['評価保留']}、⑦）")
     evaluation.append({"kind": "判断保留", "text": "。".join(pending)})
 
     # 3. 次の対応（最大3件）

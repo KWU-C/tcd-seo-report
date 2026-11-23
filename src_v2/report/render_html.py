@@ -872,35 +872,102 @@ def _eval_card_html(p: dict, with_points: bool) -> str:
 
 
 def _lead_html(c: dict) -> str:
+    """④ 今週のSEO/AIO・コンテンツ評価。冒頭①〜③の数値・事実は繰り返さず、評価・改善判断・次の対応だけを置く。"""
     lead = c["lead"]
-    html = ['<h3>最重要の変化</h3><ul class="highlights">'
-            + "".join(f"<li>{_highlight_aio_cited(h)}</li>" for h in lead["changes"]) + "</ul>"
-            if lead["changes"] else '<h3>最重要の変化</h3><p class="empty">該当なし</p>']
-    html.append('<h3>今週の評価</h3><ul class="lead-eval">'
-                + "".join(f'<li><span class="tag">{escape(e["kind"])}</span>{escape(e["text"])}</li>' for e in lead["evaluation"])
-                + "</ul>")
+    html = ['<h3>今週の評価</h3><ul class="lead-eval">'
+            + "".join(f'<li><span class="tag">{escape(e["kind"])}</span>{escape(e["text"])}</li>' for e in lead["evaluation"])
+            + "</ul>"]
     html.append('<h3>次の対応</h3><ol class="lead-actions">'
                 + "".join(f"<li>{escape(a)}</li>" for a in lead["actions"]) + "</ol>"
                 if lead["actions"] else '<h3>次の対応</h3><p class="empty">該当なし</p>')
-    html.append(_notes_html(["順位の変化は前週比（1週分）で、施策の効果判定ではない。AIOの変化は各回1回ずつの観測の比較。"
-                             "改善候補は③、全ページの評価と区分の基準はAppendix、AIOの前回比較は②。"]))
+    html.append(_notes_html(["数値と観測事実は①〜③。順位の変化は前週比（1週分）で、施策の効果判定ではない。AIOの変化は各回1回ずつの観測の比較。"
+                             "根拠の詳細は⑤〜⑦、全ページの評価と区分の基準はAppendix。"]))
     return "".join(html)
 
 
-def _aio_changes_html(aio: dict) -> str:
+# ── 冒頭②: AIO引用状況（コンパクトな一覧） ─────────────────────────────
+
+_AIO_LOST_STYLE = "color:#b42318;font-weight:700"
+
+
+def _aio_value_html(label: str) -> str:
+    """あり＝強調、なし＝注意、判定不可・対象外・取得失敗は「なし」と区別して無彩色で示す。"""
+    if label == "あり":
+        return f'<strong style="{_AIO_CITED_STYLE}">あり</strong>'
+    if label == "なし":
+        return _status_chip("なし", "warning")
+    if label.startswith("なし（"):
+        return _status_chip(label, "neutral")
+    return f'<span class="muted">{escape(label)}</span>'
+
+
+def _aio_change_summary(ch: dict) -> tuple[str, bool]:
+    names = {"generated": "AIO生成", "cited": "引用", "recommended": "推薦"}
+    parts, lost = [], False
+    for item in ("cited", "recommended", "generated"):
+        v = ch["items"][item]
+        if v["direction"]:
+            text = f"{names[item]} {v['change']}"
+            if v["direction"] == "lost" and item in ("cited", "recommended"):
+                lost = True
+                parts.append(f'<strong style="{_AIO_LOST_STYLE}">{escape(text)}</strong>')
+            else:
+                parts.append(escape(text))
+    if parts:
+        return "<br>".join(parts), lost
+    if not ch["previous_available"]:
+        return '<span class="muted">前回比較不可</span>', False
+    unknown = [names[k] for k in ("cited", "recommended") if ch["items"][k]["change"] == "前回比較不可"]
+    return "変化なし" + (f'<span class="cell-note">{escape("・".join(unknown))}は前回比較不可</span>' if unknown else ""), False
+
+
+def _aio_top_html(c: dict) -> str:
     rows = []
-    for ch in aio["changes"]:
-        cells = [escape(ch["market_label"])]
-        for item in ("generated", "cited", "recommended"):
-            v = ch["items"][item]
-            strong = v["direction"] == "lost" and item in ("cited", "recommended")
-            change = f"<strong>{escape(v['change'])}</strong>" if strong else escape(v["change"])
-            cells.append(f"{change}<span class='cell-note'>前回 {escape(v['prev'])} → 今回 {escape(v['cur'])}</span>")
-        cells.append(f"{escape(ch['previous_observed'])} → {escape(ch['current_observed'])}")
-        rows.append(cells)
-    return ("<h3>前回の観測との比較</h3>"
-            + _table_html(["キーワード", "AIO生成", "TCDの引用", "TCDの会社推薦", "観測日時（前回→今回）"], rows, num_from=99, extra_class="content-table")
-            + (_notes_html(aio["change_notes"]) if aio.get("change_notes") else ""))
+    for ch in c["aio"]["changes"]:
+        change, lost = _aio_change_summary(ch)
+        rows.append([f"<strong>{escape(ch['market_label'])}</strong>",
+                     escape(ch["items"]["generated"]["cur"]), _aio_value_html(ch["items"]["cited"]["cur"]),
+                     _aio_value_html(ch["items"]["recommended"]["cur"]), change])
+    obs = c["aio"]["changes"][0] if c["aio"]["changes"] else None
+    note = (f"前回 {obs['previous_observed']} → 今回 {obs['current_observed']} の観測（各キーワード1回）の比較。"
+            if obs else "")
+    return (_table_html(["キーワード", "AIO生成", "TCD引用", "TCD推薦", "前回からの変化"], rows, num_from=99, extra_class="content-table")
+            + _notes_html([note + "「判定不可」「対象外」は「なし」とは別（判定できない・推薦の判定対象ではない）。"
+                           "前回比較の詳細・引用ドメイン・競合・日次観測の補足は⑤。"]))
+
+
+# ── 冒頭③: SEO検索順位（コンパクトな一覧） ─────────────────────────────
+
+def _seo_top_html(c: dict, seo_notes: list[str]) -> str:
+    rows = []
+    for r in c["keyword_pages"]:
+        if r["tier"] == "reference":
+            continue
+        shown = r["position"] is not None and r["impressions"]
+        pos = f'<span class="rank-value">{r["position"]:.1f}</span>' if shown else '— <span class="cell-note">表示データなし</span>'
+        move = r.get("move") if shown else None
+        delta = r.get("delta_label") or "—"
+        if move == "順位上昇":
+            chip = _status_chip(f"▲ {delta}", "good")
+        elif move == "順位低下":
+            chip = _status_chip(f"▼ {delta}", "critical")
+        else:
+            chip = _status_chip(delta, "neutral")
+        related = f'<span class="cell-note">{escape(RELATED_QUERIES_NOTE)}</span>' if r.get("includes_related_queries") else ""
+        rows.append([f"<strong>{escape(r['market_label'])}</strong>{related}", f'<span class="muted">{escape(r.get("volume_label") or "-")}</span>',
+                     pos, chip, str(r["impressions"]), str(r["clicks"])])
+    return (_table_html(["キーワード", "月間検索Vol.（参考）", "平均順位", "前週比", "Imp", "Click"], rows, num_from=2, extra_class="content-table")
+            + _notes_html(["▲順位上昇／▼順位低下＝前週から2.0位以上の変化（1週分）。それ未満と参考値は無彩色。"
+                           "ページ別の分析と改善候補は⑥。", *seo_notes]))
+
+
+def _aio_changes_html(aio: dict) -> str:
+    """⑤ 前回比較の補足。引用・推薦の変化そのものは②の一覧にあるため繰り返さず、日次観測の結果と、
+    比較できなかった項目の理由（前回・今回の値）だけを置く。"""
+    items = [*(aio.get("change_notes") or []), *(aio.get("comparison_supplements") or [])]
+    if not items:
+        return ""
+    return "<h3>前回比較の補足（日次観測など）</h3>" + _notes_html(items)
 
 
 def _aio_content_html(c: dict) -> str:
@@ -908,15 +975,12 @@ def _aio_content_html(c: dict) -> str:
     rows = []
     for r in aio["rows"]:
         top = r["top_page"]
-        cited = (f'<strong style="{_AIO_CITED_STYLE}">あり</strong>' if r["tcd_cited"] else escape(r["tcd_cited_label"]))
-        rec = (f'<strong style="{_AIO_CITED_STYLE}">あり</strong>' if r["tcd_recommended_label"] == "あり"
-               else escape(r["tcd_recommended_label"]))
-        rows.append([escape(r["market_label"]), escape(r["aio_generated_label"]), cited, rec,
+        rows.append([escape(r["market_label"]),
                      escape(r["competitor_recommendation_label"]),
                      escape(r["citation_count_label"]),
                      (f"{escape(top['name'])}<span class='cell-note'>{_p1(top['position'])}位・表示{top['impressions']}</span>" if top else "—")])
-    html = [f'<p class="lede-line">{_highlight_aio_cited(aio["summary"])}。</p>', _aio_changes_html(aio), "<h3>今回の観測</h3>",
-            _table_html(["キーワード", "AIO", "TCDの引用", "TCDの推薦", "競合の推薦", "引用ドメイン", "TCDで最も表示されたページ"],
+    html = [_aio_changes_html(aio), "<h3>今回の観測（引用ドメイン・競合）</h3>",
+            _table_html(["キーワード", "競合の推薦", "引用ドメイン", "TCDで最も表示されたページ"],
                         rows, num_from=99, extra_class="content-table")]
     cards = []
     for r in aio["rows"]:
@@ -944,12 +1008,8 @@ def _seo_content_html(c: dict, seo_notes: list[str]) -> str:
     for r in c["keyword_pages"]:
         if r["tier"] == "reference":
             continue
-        shown = r["position"] is not None and r["impressions"]
-        pos = (f"<span class='rank-value'>{r['position']:.1f}</span><span class='cell-note'>{escape(r['delta_label'])}</span>"
-               if shown else "—")
         pages = "".join(_kw_page_html(p) for p in r["pages"][:3]) or "—"
-        krows.append([escape(r["market_label"]), escape(r["intent_label"]), pos,
-                      f"{r['impressions']}／{r['clicks']}", pages, escape(r["page_evaluation"] or "—")])
+        krows.append([escape(r["market_label"]), escape(r["intent_label"]), pages, escape(r["page_evaluation"] or "—")])
         if r["movement"]:
             checks.append(f'<div class="query-card"><h4 class="card-title">「{escape(r["market_label"])}」の順位変動（前週比・1週）</h4>'
                           '<div class="sub-head">このキーワードに一致したクエリでの、ページ別の表示（事実）</div>'
@@ -961,7 +1021,7 @@ def _seo_content_html(c: dict, seo_notes: list[str]) -> str:
                           f'<div class="sub-head">事実</div><ul class="fact-list"><li>{escape(r["page_evaluation"])}</li></ul>'
                           f'<div class="judgment-line">次の対応: {escape(r["investigate"])}</div></div>')
     html = ["<h3>重点キーワードで表示されたページ</h3>",
-            _table_html(["キーワード", "検索意図", "平均順位", "表示／クリック", "表示されたページ（上位3）", "評価"], krows, num_from=99, extra_class="content-table")]
+            _table_html(["キーワード", "検索意図", "表示されたページ（上位3。今週・前週）", "評価"], krows, num_from=99, extra_class="content-table")]
     if checks:
         html.append('<div class="card-grid">' + "".join(checks) + "</div>")
     lrows = [[_status_chip(p["status"], p["state"]), _page_name_html(p), f"{_p1(p['prev_position'])}→{_p1(p['position'])}",
@@ -1091,39 +1151,56 @@ def render_html_content(vm: dict) -> str:
     c = vm["content"]
     appendix = vm["appendix"]
     initiatives_title, initiatives_html = _initiatives_html(appendix)
+    seo_notes = [n.replace("改善・悪化の判定", "順位上昇・低下の判定") for n in vm["priority_markets"]["seo_notes"] + notes["seo"]]
     body = f"""
 <div class="report-root">
 <h1>TCD週次SEO/AIOレポート（{escape(periods['title'])}）</h1>
 <p class="note">{escape(periods['header_note'])} ／ データ品質: {escape(header['data_quality_label'])} ／ 継続週数: {escape(str(header.get('weeks_available', '-')))}週</p>
 
+<section>
+  <h2>① サイト全体のアクセス状況{escape(sec['site_usage'])}</h2>
+  {_summary_tiles_html(vm["site_usage"])}
+  {_notes_html([f"カードの数値: GA4 {vm['site_usage']['metric_label']}（人）。前週比は現行の集計条件どうしの比較。流入元・推移などの詳細は⑨。",
+                *(f"異常値（原因未確認）: {a}" for a in vm["site_usage"]["anomaly_notes"])])}
+</section>
+
+<section>
+  <h2>② AIO引用状況{escape(sec['aio'])}</h2>
+  {_aio_top_html(c)}
+</section>
+
+<section>
+  <h2>③ SEO検索順位{escape(sec['seo'])}</h2>
+  {_seo_top_html(c, seo_notes)}
+</section>
+
 <section class="executive-summary">
-  <h2>① 今週のSEO/AIO・コンテンツ評価</h2>
+  <h2>④ 今週のSEO/AIO・コンテンツ評価</h2>
   {_lead_html(c)}
 </section>
 
 <section>
-  <h2>② AIO評価・競合比較{escape(sec['aio'])}</h2>
+  <h2>⑤ AIO詳細・競合比較{escape(sec['aio'])}</h2>
   {_aio_content_html(c)}
 </section>
 
 <section>
-  <h2>③ SEO・コンテンツ評価{escape(sec['seo'])}</h2>
-  {_seo_content_html(c, [n.replace("改善・悪化の判定", "順位上昇・低下の判定") for n in vm["priority_markets"]["seo_notes"] + notes["seo"]])}
+  <h2>⑥ SEO・コンテンツ改善候補{escape(sec['seo'])}</h2>
+  {_seo_content_html(c, [])}
 </section>
 
 <section>
-  <h2>④ 実施施策と効果検証</h2>
+  <h2>⑦ 実施施策と効果検証</h2>
   {_initiatives_content_html(c)}
 </section>
 
 <section>
-  <h2>⑤ 問い合わせ実績{escape(sec['inquiries'])}</h2>
+  <h2>⑧ 問い合わせ実績{escape(sec['inquiries'])}</h2>
   {_inquiry_dashboard_html(c)}
 </section>
 
 <section>
-  <h2>⑥ アクセスの詳細{escape(sec['site_usage'])}</h2>
-  {_site_usage_summary_html(vm["site_usage"])}
+  <h2>⑨ アクセスの詳細{escape(sec['site_usage'])}</h2>
   {_site_usage_v2_html(vm["site_usage"])}{_notes_html(notes["site_usage"]) if notes["site_usage"] else ""}
 </section>
 
