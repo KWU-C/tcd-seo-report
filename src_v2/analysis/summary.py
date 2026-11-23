@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from src_v2 import config_loader
@@ -23,6 +23,9 @@ from src_v2.schema import SCHEMA_VERSION
 
 PROCESSED_DIR = Path("data_v2/processed")
 INITIATIVES_MD = Path("docs/current-initiatives.md")
+# 日次AIO監視（scripts/aio_daily_monitor.sh、平日9:30）の判定結果。週次の前回比較の補足（継続性の確認）に使うだけで、
+# 週次の判定には使わない
+AIO_DAILY_DIR = Path("data/aio/daily")
 
 
 def _period_dirs(processed_root: Path) -> list[Path]:
@@ -150,6 +153,31 @@ def _annotate_persistence(findings: list[dict], processed_root: Path, period: di
         f["persistence"] = {"consecutive_weeks": weeks, "previous_available": prv_path.exists()}
 
 
+def _aio_daily_context(bundle: dict, daily_dir: Path = AIO_DAILY_DIR, days: int = 14) -> dict | None:
+    """今回の週次AIO観測日（JST）までの直近 days 日の日次観測。週次の観測キーワードと同じクエリだけを、値を変えずに持つ。"""
+    obs = bundle.get("aio_observations") or []
+    stamps = [o.get("observed_at") for o in obs if o.get("observed_at")]
+    if not stamps or not daily_dir.exists():
+        return None
+    end = (datetime.strptime(max(stamps), "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)).date()
+    start = end - timedelta(days=days)
+    queries = {o["query"] for o in obs}
+    by_query: dict[str, list[dict]] = {q: [] for q in queries}
+    for f in sorted(daily_dir.glob("*.json")):
+        try:
+            day = date.fromisoformat(f.stem)
+        except ValueError:
+            continue
+        if not (start <= day <= end):
+            continue
+        for o in json.loads(f.read_text(encoding="utf-8")):
+            if o.get("query") in by_query:
+                by_query[o["query"]].append({
+                    "date": f.stem, "status": o.get("status"), "aio_exists": o.get("aio_exists"),
+                    "tcd_cited": o.get("tcd_cited"), "recommendation_status": o.get("recommendation_status")})
+    return {"source": str(daily_dir), "window": {"start": start.isoformat(), "end": end.isoformat()}, "by_query": by_query}
+
+
 def _data_summary(bundle: dict, excluded_cfg: dict | None) -> dict:
     """記述的メタデータのみ（取得件数・比較週有無・除外リスト）。判定ロジックは含まない。
     Phase 5のレポート層がanalysis.json以外（normalized.json・config_v2/等）を
@@ -220,6 +248,7 @@ def run_analysis(
         "access": build_access_summary(bundle, thresholds_cfg),
         "ga4_revision": _ga4_revision(bundle, processed_root),
         "inquiries_snapshot": bundle.get("inquiries_snapshot"),
+        "aio_daily": _aio_daily_context(bundle),
         "findings": findings,
         "counts": _counts(findings),
     }

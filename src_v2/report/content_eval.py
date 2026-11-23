@@ -16,7 +16,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 _INTENT_LABELS = {
     "conversion": "依頼先・サービスを検討する",
@@ -352,7 +352,142 @@ def _domain_type(domain: str) -> str:
     return "企業・メディア等"
 
 
-def _citation_change(summary: dict | None, findings: list[dict], domains: list[str]) -> dict:
+# ── AIOの前回差分（推薦・引用・生成の あり⇄なし） ─────────────────────────
+
+_JST = timezone(timedelta(hours=9))
+AIO_CHANGE_PRIORITY = {("recommended", "lost"): 0, ("cited", "lost"): 1, ("recommended", "gained"): 2,
+                       ("cited", "gained"): 3, ("generated", "lost"): 4, ("generated", "gained"): 5}
+_AIO_ITEM_LABELS = {"recommended": "TCDの会社推薦", "cited": "TCDの引用", "generated": "AIO生成"}
+
+
+def _jst(ts: str | None) -> str:
+    if not ts:
+        return "—"
+    try:
+        t = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).astimezone(_JST)
+    except ValueError:
+        return ts
+    return f"{t.month}/{t.day} {t:%H:%M}"
+
+
+def _aio_state(snap: dict | None, item: str) -> tuple[bool | None, str]:
+    """観測1回分の、項目ごとの値（True/False/None＝判定できない）と表示ラベル。値は観測データのまま使う。"""
+    if not snap or snap.get("acquisition_status") != "success":
+        return None, "取得失敗" if snap else "観測なし"
+    gen = snap.get("aio_generated")
+    if item == "generated":
+        return (bool(gen), "あり" if gen else "なし") if gen is not None else (None, "判定不可")
+    if not gen:
+        return False, "なし（AIO未生成）"
+    if item == "cited":
+        if snap.get("citation_status") == "unavailable" or snap.get("tcd_cited") is None:
+            return None, "判定不可"
+        return bool(snap["tcd_cited"]), "あり" if snap["tcd_cited"] else "なし"
+    status = snap.get("recommendation_status")
+    if status == "recommended":
+        return True, "あり"
+    if status == "not_recommended":
+        return False, "なし"
+    if status == "not_applicable":
+        return None, "対象外"
+    return None, "判定不可"
+
+
+def build_aio_changes(market_findings: list[dict], keyword_pages: list[dict]) -> list[dict]:
+    """定点観測キーワードの前回→今回の照合。前回の観測が無い・判定不可の項目は「前回比較不可」とし、推測で補わない。
+    AIO未生成のときの引用・推薦は「なし（AIO未生成）」として扱うが、生成の変化と混同しないよう項目を分けて記録する。"""
+    ev_by_query = {(f.get("evidence") or {}).get("query"): (f.get("evidence") or {}) for f in market_findings}
+    out = []
+    for r in keyword_pages:
+        if r["tier"] == "reference":
+            continue
+        ev = ev_by_query.get(r["query"]) or {}
+        prev, cur = ev.get("aio_previous"), ev.get("aio_current")
+        items = {}
+        for item in ("generated", "cited", "recommended"):
+            if item == "recommended" and r["tier"] != "deal":
+                items[item] = {"prev": "対象外", "cur": "対象外", "change": "対象外", "direction": None}
+                continue
+            pv, pl = _aio_state(prev, item)
+            cv, cl = _aio_state(cur, item)
+            if prev is None:
+                change, direction = "前回比較不可（前回の観測データなし）", None
+            elif pv is None or cv is None:
+                change, direction = "前回比較不可", None
+            elif pv and not cv:
+                change, direction = "あり→なし", "lost"
+            elif cv and not pv:
+                change, direction = "なし→あり", "gained"
+            else:
+                change, direction = "変化なし", None
+            items[item] = {"prev": pl, "cur": cl, "change": change, "direction": direction}
+        out.append({"query": r["query"], "market_label": r["market_label"], "short_label": r["short_label"],
+                    "tier": r["tier"], "previous_observed": _jst((prev or {}).get("observed_at")),
+                    "current_observed": _jst((cur or {}).get("observed_at")), "items": items,
+                    "previous_available": prev is not None})
+    return out
+
+
+def _md_date(d: str) -> str:
+    return f"{int(d[5:7])}/{int(d[8:10])}"
+
+
+def aio_daily_note(daily: dict | None, query: str, current_observed_at: str | None) -> str | None:
+    """日次AIO監視の同じクエリの観測（今回の週次観測日まで）の要約。週次の判定は変えず、継続性の確認材料として添える。"""
+    rows = [r for r in ((daily or {}).get("by_query") or {}).get(query) or [] if r.get("status", "").startswith("OK")]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: r["date"])
+    n = len(rows)
+    rec = sum(1 for r in rows if r.get("recommendation_status") == "recommended")
+    cited = sum(1 for r in rows if r.get("tcd_cited") is True)
+    span = f"{_md_date(rows[0]['date'])}〜{_md_date(rows[-1]['date'])}の{n}回"
+    if rec == n and cited == n:
+        text = f"日次のAIO監視では、{span}の観測すべてで推薦あり・引用あり"
+    else:
+        text = f"日次のAIO監視では、{span}の観測のうち推薦あり{rec}回・引用あり{cited}回"
+    if current_observed_at:
+        cur = (datetime.strptime(current_observed_at, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)).date()
+        nxt = date.fromisoformat(rows[-1]["date"]) + timedelta(days=1)
+        if nxt <= cur:
+            text += f"。{_md_date(nxt.isoformat())}〜{_md_date(cur.isoformat())}の日次データはない"
+    return text
+
+
+def aio_change_events(changes: list[dict]) -> list[dict]:
+    """あり⇄なしの変化だけを、推薦・引用の消失を先頭にして並べる。"""
+    events = []
+    for c in changes:
+        for item, v in c["items"].items():
+            if v["direction"]:
+                events.append({"query": c["query"], "market_label": c["market_label"], "item": item,
+                               "label": _AIO_ITEM_LABELS[item], "direction": v["direction"], "change": v["change"],
+                               "previous_observed": c["previous_observed"], "current_observed": c["current_observed"],
+                               "priority": AIO_CHANGE_PRIORITY[(item, v["direction"])]})
+    events.sort(key=lambda e: e["priority"])
+    return events
+
+
+def aio_event_lines(events: list[dict]) -> list[dict]:
+    """同じキーワードの変化（推薦と引用の消失など）は1行にまとめる。各行の priority は最も高いもの。"""
+    by_query: dict[str, list[dict]] = {}
+    for e in events:
+        by_query.setdefault(e["query"], []).append(e)
+    lines = []
+    for q, es in by_query.items():
+        parts = "、".join(f"{e['label']}が{e['change']}" for e in es)
+        e0 = es[0]
+        text = (f"「{e0['market_label']}」のAIOで{parts}（前回{e0['previous_observed']}→今回{e0['current_observed']}の観測）。"
+                "各回1回ずつの観測の比較で、継続するかは次回以降の観測で確認する")
+        lines.append({"text": text, "priority": min(e["priority"] for e in es), "query": q,
+                      "lost": any(e["direction"] == "lost" and e["item"] in ("recommended", "cited") for e in es),
+                      "events": es})
+    lines.sort(key=lambda x: x["priority"])
+    return lines
+
+
+def _citation_change(summary: dict | None, findings: list[dict], domains: list[str],
+                     previous: dict | None = None) -> dict:
     """引用ドメインの母数（今回の件数）と、前回の観測からの増減を分けて持つ。
     母数は今回の引用ドメイン一覧、増減は analysis の competitor_summary（前回の観測との差集合）。"""
     summary = summary or {}
@@ -361,7 +496,10 @@ def _citation_change(summary: dict | None, findings: list[dict], domains: list[s
     new = list(summary.get("new_domains") or [])
     return {
         "current": len(domains),
-        "comparison_available": bool(summary.get("comparison_available")),
+        # 前回の引用元がGoogle内部リンクだけでドメインを特定できなかった場合は、件数を比べない（「前回0件」と誤読させない）
+        "comparison_available": bool(summary.get("comparison_available")) and not (
+            previous and previous.get("cited_source_count") and not previous.get("resolvable_domain_count")),
+        "previous_unresolved": bool(previous and previous.get("cited_source_count") and not previous.get("resolvable_domain_count")),
         "previous": summary.get("previous_count"),
         "new": new,
         # 前回の観測には無かったが、直近4回の観測のどこかで引用されたことがあるもの（再出現）
@@ -372,17 +510,31 @@ def _citation_change(summary: dict | None, findings: list[dict], domains: list[s
 
 def citation_count_label(ch: dict) -> str:
     """例: 現在5件（うち前回なし2件）／前回から消失1件（前回4件）"""
+    if ch.get("previous_unresolved"):
+        return f"現在{ch['current']}件（前回比較不可: 前回の引用元はドメインを特定できず）"
     if not ch["comparison_available"]:
-        return f"現在{ch['current']}件（前回の観測と比較できず）"
+        return f"現在{ch['current']}件（前回比較不可）"
     head = f"現在{ch['current']}件（うち前回なし{len(ch['new'])}件）" if ch["new"] else f"現在{ch['current']}件（前回なしは0件）"
     prev = f"（前回{ch['previous']}件）" if ch.get("previous") is not None else ""
     return f"{head}／前回から消失{len(ch['dropped'])}件{prev}"
 
 
 def build_aio_evaluation(keyword_pages: list[dict], competitor_findings: list[dict],
-                         market_findings: list[dict] | None = None) -> dict:
+                         market_findings: list[dict] | None = None, aio_daily: dict | None = None) -> dict:
     summary_by_query = {(f.get("evidence") or {}).get("query"): (f.get("evidence") or {}).get("competitor_summary")
                         for f in market_findings or []}
+    previous_by_query = {(f.get("evidence") or {}).get("query"): (f.get("evidence") or {}).get("aio_previous")
+                         for f in market_findings or []}
+    changes = build_aio_changes(market_findings or [], keyword_pages)
+    lines = aio_event_lines(aio_change_events(changes))
+    current_by_query = {(f.get("evidence") or {}).get("query"): ((f.get("evidence") or {}).get("aio_current") or {}).get("observed_at")
+                        for f in market_findings or []}
+    daily_notes = {}
+    for x in lines:
+        note = aio_daily_note(aio_daily, x["query"], current_by_query.get(x["query"]))
+        if note:
+            word = "低下" if x["lost"] else "向上" if all(e["direction"] == "gained" for e in x["events"]) else "変化"
+            daily_notes[x["query"]] = note + f"。今回の変化は週次の観測1回で、恒常的な{word}とは判断しない"
     findings_by_query: dict[str, list[dict]] = {}
     for f in competitor_findings:
         findings_by_query.setdefault((f.get("evidence") or {}).get("query"), []).append(f)
@@ -398,7 +550,8 @@ def build_aio_evaluation(keyword_pages: list[dict], competitor_findings: list[di
         types: dict[str, int] = {}
         for d in domains:
             types[_domain_type(d)] = types.get(_domain_type(d), 0) + 1
-        ch = _citation_change(summary_by_query.get(r["query"]), findings_by_query.get(r["query"], []), domains)
+        ch = _citation_change(summary_by_query.get(r["query"]), findings_by_query.get(r["query"], []), domains,
+                              previous_by_query.get(r["query"]))
         top = r["pages"][0] if r.get("pages") else None
         facts, points = [], []
         if r["aio_generated_label"] == "あり":
@@ -408,12 +561,12 @@ def build_aio_evaluation(keyword_pages: list[dict], competitor_findings: list[di
                          f"{'、'.join(f'{k}{v}件' for k, v in types.items()) or '—'}")
         else:
             facts.append(f"AIO: {r['aio_generated_label']}（TCDの引用 {r['tcd_cited_label']}）")
-        if ch["new"]:
+        if ch["new"] and ch["comparison_available"]:
             seen = ch["new_seen_before"]
             again = ("いずれも直近4回の観測で以前にも引用あり" if seen and len(seen) == len(ch["new"])
                      else f"うち{'、'.join(seen)}は直近4回の観測で以前にも引用あり" if seen else "")
             facts.append(f"前回なし（今回引用）: {'、'.join(ch['new'])}" + (f"。{again}" if again else ""))
-        if ch["dropped"]:
+        if ch["dropped"] and ch["comparison_available"]:
             facts.append(f"前回から消失: {'、'.join(ch['dropped'])}")
         if r["tier"] == "deal":
             facts.append("競合の推薦（AIOが依頼先として挙げた会社）: 未取得")
@@ -446,7 +599,11 @@ def build_aio_evaluation(keyword_pages: list[dict], competitor_findings: list[di
     cross = {d: qs for d, qs in domain_queries.items() if len(qs) >= 2}
     cited = [r["short_label"] for r in rows if r["tcd_cited"]]
     summary = (f"TCDの引用あり: {'・'.join(cited)}" if cited
-               else f"定点観測{len(rows)}キーワードでTCDの引用は確認できず")
+               else f"今回の観測では定点観測{len(rows)}キーワードでTCDの引用なし")
+    lost = [x for x in lines if x["lost"]]
+    if lost:
+        summary = "前回からの消失あり（" + "／".join(
+            "・".join(f"{e['label']}{e['change']}" for e in x["events"]) + f"：{x['events'][0]['market_label']}" for x in lost) + "）。" + summary
     recommended = [r for r in rows if r["tier"] == "deal"]
     if recommended:
         summary += ("。TCDの推薦（会社を探す検索）: "
@@ -461,8 +618,13 @@ def build_aio_evaluation(keyword_pages: list[dict], competitor_findings: list[di
         "機械判定で、サイトの内容は確認していない。",
         "引用ドメインの件数は今回の観測の件数（母数）。「前回なし」「前回から消失」は、前回の観測（前週）との比較による増減で、母数とは別に数える。",
         "「確認する論点」は観測事実から立てた問いで、原因の推定ではない。",
+        "前回との比較は、前週のレポート時の観測（各キーワード1回）と今回の観測の照合。前回の観測データが無い・判定不可の項目は"
+        "「前回比較不可」とし、推測で補わない。TCDの会社推薦・TCDの引用・AIO生成は別の項目として判定する。"
+        "1回の観測での変化を、恒常的な評価の低下・向上とは判断しない。",
     ]
-    return {"rows": rows, "cross_domains": cross, "summary": summary, "notes": notes}
+    return {"rows": rows, "cross_domains": cross, "summary": summary, "notes": notes,
+            "changes": changes, "change_lines": lines,
+            "change_notes": [f"{next(c['market_label'] for c in changes if c['query'] == q)}: {t}" for q, t in daily_notes.items()]}
 
 
 # ── ④ 実施施策と効果検証 ────────────────────────────────────────
@@ -623,53 +785,90 @@ def build_inquiry_dashboard(inq: dict) -> dict:
 
 # ── ① 今週のSEO/AIO・コンテンツ評価 ───────────────────────────────
 
-def _lp_line(p: dict) -> str:
-    return (f"{p['short_title']} {_pos(p['prev_position'])}→{_pos(p['position'])}位・"
-            f"表示{p['prev_impressions']:,}→{p['impressions']:,}・クリック{p['prev_clicks']}→{p['clicks']}")
+LEAD_MAX_CHANGES = 3
+LEAD_MAX_ACTIONS = 3
 
 
 def build_lead(keyword_pages: list[dict], pages: list[dict], aio: dict, initiatives: dict,
                inquiry_dashboard: dict, site_usage: dict) -> dict:
-    headline = []
-    # 1. 商談キーワード（deal）の順位変動と、表示されたページ
-    for r in keyword_pages:
-        if r["tier"] != "deal":
-            continue
-        if r.get("move"):
-            line = (f"「{r['market_label']}」は{r['prev_position']:.1f}→{r['position']:.1f}位"
-                    f"（{r['move']}・前週比1週、表示{r['impressions']:,}）")
+    """① 冒頭の意思決定サマリー: 最重要の変化（最大3件。AIOの推薦・引用の獲得／消失が最優先で、
+    消失は件数に関係なく必ず載せる）・今週の評価（改善・悪化・判断保留の要点）・次の対応（最大3件）。
+    ページ一覧・判定基準などの詳細は③・Appendix に置く。"""
+    deal = [r for r in keyword_pages if r["tier"] == "deal"]
+    lps = {p["page_id"]: p for p in build_regional_lp_summary(pages)}
+
+    # 1. 最重要の変化
+    aio_lines = aio.get("change_lines") or []
+    must = [x["text"] for x in aio_lines if x["lost"]]
+    optional = [x["text"] for x in aio_lines if not x["lost"]]
+    for r in deal:
+        if r.get("move") == "順位低下" or r.get("move") == "順位上昇":
+            line = f"「{r['market_label']}」の平均順位が{r['prev_position']:.1f}→{r['position']:.1f}位（{r['move']}・前週比1週）"
             if r.get("pages"):
-                line += f"。このキーワードで最も表示されたのは{_page_move(r['pages'][0])}"
-            line += "。要因はページ×クエリで確認する（③）。1週の変化のため、これだけで改修は決めない"
-            headline.append(line)
+                line += f"。最も表示された{_page_move(r['pages'][0])}"
+            optional.append(line)
+    for r in deal:
         if r.get("investigate"):
-            headline.append(f"調査対象: 「{r['market_label']}」で{r['page_evaluation']}。理由は未確認")
-    # 2. 地域LP全体（キーワード単位とは別）
-    lps = build_regional_lp_summary(pages)
-    if lps:
-        headline.append("地域LP（そのページに表示された全クエリの合計）: " + "／".join(_lp_line(p) for p in lps))
-    # 3. AIO
-    headline.append("AIO: " + aio["summary"])
-    # 4. 施策
+            optional.append(f"調査対象: 「{r['market_label']}」で{r['page_evaluation']}。理由は未確認")
+    changes = must + optional[:max(0, LEAD_MAX_CHANGES - len(must))]
+
+    # 2. 今週の評価（改善・悪化・判断保留）。「最重要の変化」の数値を繰り返さず、解釈・判断だけを書く
+    evaluation = []
+    lost = [x for x in aio_lines if x["lost"]]
+    lost_queries = {x["query"] for x in lost}
+    for r in deal:
+        aio_lost = r["query"] in lost_queries
+        lp = next((lps[k] for k in r.get("expected_pages") or [] if k in lps), None)
+        lp_down = bool(lp and lp["status"] == STATUS_DOWN)
+        if r.get("move") == "順位低下" or aio_lost:
+            parts = [x for x, ok in (("AIOの推薦・引用", aio_lost), ("検索順位", r.get("move") == "順位低下")) if ok]
+            text = f"「{r['market_label']}」は{'と'.join(parts)}がそろって前回より後退した"
+            if lp_down:
+                text += "。地域LPは全クエリの合計でも順位が下がっており、このキーワードだけの変動ではない"
+            text += "。ただし1回・1週の観測で、恒常的な低下とは判断しない。次回以降も続けば対応を検討する"
+            evaluation.append({"kind": "悪化", "text": text})
+    for x in lost:
+        if x["query"] not in {r["query"] for r in deal}:
+            evaluation.append({"kind": "悪化", "text": f"「{x['events'][0]['market_label']}」のAIOでTCDの推薦・引用が消失した。1回の観測で、恒常的な低下とは判断しない"})
+    ups = [p for p in pages if p["status"] == STATUS_UP]
+    if ups:
+        with_clicks = [p for p in ups if p["clicks"] > p["prev_clicks"]]
+        intents: dict[str, int] = {}
+        for p in ups:
+            intents[p["intent_label"]] = intents.get(p["intent_label"], 0) + 1
+        top_intent, top_n = max(intents.items(), key=lambda kv: kv[1])
+        where = f"検索意図が「{top_intent}」のページを中心に" if top_n * 2 >= len(ups) else ""
+        evaluation.append({"kind": "改善", "text": f"{where}前週より順位が上がったページが{len(ups)}ページある。"
+                                                  f"クリックが増えたのはそのうち{len(with_clicks)}ページで、成果につながるかは翌週以降に確認する"})
     c = initiatives["counts"]
-    headline.append(f"施策{initiatives['item_count']}件（表示{sum(c.values())}行）: "
-                    f"評価可能{c['評価可能']}・要調査{c['要調査']}・評価保留{c['評価保留']}（因果関係は判断していない）")
+    pending = []
+    for r in deal:
+        if r.get("investigate"):
+            pending.append(f"「{r['market_label']}」は地域LP以外のページが多く表示される理由が未確認のため、良否を判断しない")
+    pending.append(f"施策は効果・悪影響を判断できる段階にない（要調査{c['要調査']}・評価保留{c['評価保留']}、④）")
+    evaluation.append({"kind": "判断保留", "text": "。".join(pending)})
 
-    progressed = [p for p in pages if p["status"] == STATUS_UP][:4]
-    candidates = sorted([p for p in pages if p["status"] in _CANDIDATE_STATUSES], key=_candidate_priority)[:4]
+    # 3. 次の対応（最大3件）
+    actions = []
+    for x in lost:
+        actions.append(f"「{x['events'][0]['market_label']}」のAIOで推薦・引用が戻るかを次回以降の観測（日次のAIO監視を含む）で確認し、"
+                       "今回引用されたページとTCDのページ（所在地・実績の示し方）を比べる")
+    for r in deal:
+        if r.get("move") == "順位低下":
+            actions.append(f"「{r['market_label']}」の順位低下の要因を、ページ×クエリで前週と比べて確認する（1週の変化のため、改修はまだ決めない）")
+    for r in deal:
+        if r.get("investigate"):
+            top = r["pages"][0]["name"] if r.get("pages") else "他のページ"
+            actions.append(f"「{r['market_label']}」で{top}の表示が地域LPより多い理由を、どのクエリでどちらのページが表示されているかで調べる")
+    for row in initiatives["rows"]:
+        if row["class"] == "要調査" and row.get("next_action"):
+            actions.append(f"施策「{'／'.join(row['names'])}」: {row['next_action']}")
+    actions = actions[:LEAD_MAX_ACTIONS]
+
+    progressed = [p for p in pages if p["status"] == STATUS_UP]
     thin = [p for p in pages if p["status"] == STATUS_INSUFFICIENT and p["objective"] in ("conversion", "regional", "comparison")]
-
-    kpis = []
-    tiles = {t["key"]: t for t in inquiry_dashboard["tiles"]}
-    case = tiles.get("project_consultation")
-    if case and case["current"] is not None:
-        kpis.append(f"案件相談 {case['current']}件" + (f"（直近4週 {case['cumulative_4w']}件）" if case["cumulative_complete"] else ""))
-    ch = (site_usage or {}).get("channels") or {}
-    organic = next((r for r in ch.get("rows") or [] if r.get("key") == "organic" or r.get("label") == "自然検索"), None)
-    if organic:
-        kpis.append(f"自然検索セッション {organic['current']:,}（前週{organic['comparison']:,}）")
-    ai = next((r for r in ch.get("rows") or [] if r.get("label") == "生成AI"), None)
-    if ai:
-        kpis.append(f"生成AIからのセッション {ai['current']:,}（前週{ai['comparison']:,}）")
-    return {"headline": headline, "progressed": progressed, "candidates": candidates,
-            "thin_candidates": thin, "kpi_line": "／".join(kpis)}
+    # 地域LPは③の「地域LPの検索実績」に区分・論点・次の対応を載せるため、改善候補には重ねて載せない
+    candidates = sorted([p for p in pages if p["status"] in _CANDIDATE_STATUSES and p["objective"] != "regional"],
+                        key=_candidate_priority)
+    return {"changes": changes, "evaluation": evaluation, "actions": actions,
+            "progressed": progressed, "candidates": candidates, "thin_candidates": thin}

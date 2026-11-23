@@ -1212,7 +1212,8 @@ def build_view_model(analysis: dict, thresholds_cfg: dict | None = None, notes_c
             page_findings, initiative_findings, priority_markets["table"], market_findings, thresholds_cfg)
         keyword_pages = content_eval.build_keyword_pages(priority_markets["table"], market_findings, page_findings,
                                                         thresholds_cfg["low_data"]["position_change_meaningful"])
-        aio_eval = content_eval.build_aio_evaluation(keyword_pages, competitor_findings, market_findings)
+        aio_eval = content_eval.build_aio_evaluation(keyword_pages, competitor_findings, market_findings,
+                                                     analysis.get("aio_daily"))
         initiative_summary = content_eval.build_initiative_summary(
             initiative_findings, (thresholds_cfg.get("initiative_review") or {}).get("significance_t", 2.0))
         inquiry_dashboard = content_eval.build_inquiry_dashboard(inquiries)

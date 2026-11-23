@@ -259,8 +259,9 @@ def query_composition(pre: dict[str, dict], post: dict[str, dict], n: int = 3) -
         "shared_share": shared / post_total if post_total else None,
         "pre_query_count": len(pre), "post_query_count": len(post),
         "top_post": _top_queries(post, n),
-        "increased": [d for d in sorted(deltas, key=lambda d: -d["delta"]) if d["delta"] > 0][:n],
-        "decreased": [d for d in sorted(deltas, key=lambda d: d["delta"]) if d["delta"] < 0][:n],
+        # 増減が同じクエリはクエリ名順（実行ごとに並びが変わらないようにする）
+        "increased": [d for d in sorted(deltas, key=lambda d: (-d["delta"], d["query"])) if d["delta"] > 0][:n],
+        "decreased": [d for d in sorted(deltas, key=lambda d: (d["delta"], d["query"])) if d["delta"] < 0][:n],
     }
 
 
