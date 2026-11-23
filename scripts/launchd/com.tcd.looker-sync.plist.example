@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.tcd.looker-sync</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/kwu/Documents/tcd-seo-report/.venv/bin/python</string>
+    <string>-m</string><string>looker_sync.weekly</string>
+    <string>--reports-root</string><string>/Users/kwu/Documents/tcd-seo-report/reports_v2</string>
+    <string>--state-dir</string><string>/Users/kwu/Library/Application Support/TCDLookerSync</string>
+    <string>--spreadsheet-id</string><string>1MwGltiuSR_SjmA_dsSgNr8d3ZW6GaI_ycLkKxNjDlWA</string>
+    <string>--publish</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/kwu/Documents/tcd-seo-report</string>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>30</integer></dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/kwu/Library/Logs/tcd-looker-sync.log</string>
+  <key>StandardErrorPath</key><string>/Users/kwu/Library/Logs/tcd-looker-sync.error.log</string>
+</dict></plist>
