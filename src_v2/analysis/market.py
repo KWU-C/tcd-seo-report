@@ -252,6 +252,10 @@ def analyze_market(
             "aio_citations": {"status": cite_status, "domains": normalize.competitor_domains(aio_obs),
                               "unknown_count": len((aio_obs or {}).get("unknown_sources") or [])},
             "competitor_summary": competitor_summary,
+            # 前回の観測（前週の normalized.json）の要点。レポートの「AIOの前回差分」（推薦・引用・生成の
+            # あり→なし／なし→あり）に使う。前回の観測が無い場合は None（推測で補わない）
+            "aio_previous": _aio_snapshot(prev_aio_by_query.get(representative_query)) if m.get("aio", True) else None,
+            "aio_current": _aio_snapshot(aio_obs),
         }
 
         # データ量の判定も市場ごとの最低Impを基準にする（一律50impを要求しない）
@@ -319,6 +323,26 @@ def _citations_available(obs: dict | None) -> bool:
         obs and obs.get("acquisition_status") == "success"
         and normalize.citation_status(obs) != normalize.CITATION_UNAVAILABLE
     )
+
+
+def _aio_snapshot(obs: dict | None) -> dict | None:
+    """AIO観測の要点（前回差分の判定用）。値は観測データのまま持ち、判定・補完はしない。"""
+    if not obs:
+        return None
+    sources = [d for d in (obs.get("cited_domains") or []) if d]
+    return {
+        "observed_at": obs.get("observed_at"),
+        "acquisition_status": obs.get("acquisition_status"),
+        "aio_generated": obs.get("aio_generated"),
+        "citation_status": normalize.citation_status(obs),
+        "tcd_cited": obs.get("tcd_cited"),
+        "tcd_recommended": obs.get("tcd_recommended"),
+        "recommendation_status": obs.get("recommendation_status"),
+        "cited_source_count": len(sources),
+        # Google内部リンク以外（ドメインを特定できた引用元。TCDを含む）
+        "resolvable_domain_count": len([d for d in sources if d.lower() not in normalize._NON_COMPETITOR_SOURCES]),
+        "competitor_domains": normalize.competitor_domains(obs),
+    }
 
 
 def _competitor_summary(current_obs: dict | None, previous_obs: dict | None) -> dict:

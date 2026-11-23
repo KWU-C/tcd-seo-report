@@ -204,3 +204,10 @@ def test_index_method_with_urls_is_not_judged_by_search_metrics(tmp_path):
     f = initiatives.analyze_initiatives(_md(tmp_path, md), _bundle("一覧の正規URL修正", item, sd), [], THRESHOLDS)[0]
     assert f["judgment"] == "検索流入の前後比較の対象外"
     assert "metrics" not in f["evidence"]
+
+
+def test_query_composition_ties_are_ordered_by_query():
+    pre = {"b": {"impressions": 10}, "a": {"impressions": 10}, "c": {"impressions": 1}}
+    post = {"b": {"impressions": 1}, "a": {"impressions": 1}, "c": {"impressions": 5}}
+    q = initiatives.query_composition(pre, post)
+    assert [d["query"] for d in q["decreased"]] == ["a", "b"]

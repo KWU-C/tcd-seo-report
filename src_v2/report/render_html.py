@@ -874,24 +874,33 @@ def _eval_card_html(p: dict, with_points: bool) -> str:
 def _lead_html(c: dict) -> str:
     lead = c["lead"]
     html = ['<h3>最重要の変化</h3><ul class="highlights">'
-            + "".join(f"<li>{_highlight_aio_cited(h)}</li>" for h in lead["headline"]) + "</ul>"]
-    html.append("<h3>前週比で順位が上昇したコンテンツ</h3>")
-    html.append('<div class="card-grid">' + "".join(_eval_card_html(p, False) for p in lead["progressed"]) + "</div>"
-                if lead["progressed"] else '<p class="empty">該当なし</p>')
-    html.append("<h3>確認が必要なコンテンツ（改善候補）</h3>")
-    html.append('<div class="card-grid">' + "".join(_eval_card_html(p, True) for p in lead["candidates"]) + "</div>"
-                if lead["candidates"] else '<p class="empty">該当なし</p>')
-    notes = []
-    if lead["thin_candidates"]:
-        names = "、".join(f"「{p['short_title']}」" for p in lead["thin_candidates"])
-        notes.append(f"評価材料不足（表示が週50回未満）のサービス・地域・比較ページ{len(lead['thin_candidates'])}件も改善候補に含める: "
-                     f"{names}。順位・クリックの変化は評価していない（③・Appendix）。")
-    notes.append("順位の上昇・低下は前週比（1週分）の順位変動で、施策の効果判定ではない（施策は④で実装前後を比較対照と比べる）。"
-                 "「確認すべき論点」は未確認の問いで、原因を判断したものではない。")
-    html.append(_notes_html(notes))
-    if lead["kpi_line"]:
-        html.append(f'<p class="kpi-line"><span class="tag">結果指標（参考）</span>{escape(lead["kpi_line"])}（詳細は⑤・⑥）</p>')
+            + "".join(f"<li>{_highlight_aio_cited(h)}</li>" for h in lead["changes"]) + "</ul>"
+            if lead["changes"] else '<h3>最重要の変化</h3><p class="empty">該当なし</p>']
+    html.append('<h3>今週の評価</h3><ul class="lead-eval">'
+                + "".join(f'<li><span class="tag">{escape(e["kind"])}</span>{escape(e["text"])}</li>' for e in lead["evaluation"])
+                + "</ul>")
+    html.append('<h3>次の対応</h3><ol class="lead-actions">'
+                + "".join(f"<li>{escape(a)}</li>" for a in lead["actions"]) + "</ol>"
+                if lead["actions"] else '<h3>次の対応</h3><p class="empty">該当なし</p>')
+    html.append(_notes_html(["順位の変化は前週比（1週分）で、施策の効果判定ではない。AIOの変化は各回1回ずつの観測の比較。"
+                             "改善候補は③、全ページの評価と区分の基準はAppendix、AIOの前回比較は②。"]))
     return "".join(html)
+
+
+def _aio_changes_html(aio: dict) -> str:
+    rows = []
+    for ch in aio["changes"]:
+        cells = [escape(ch["market_label"])]
+        for item in ("generated", "cited", "recommended"):
+            v = ch["items"][item]
+            strong = v["direction"] == "lost" and item in ("cited", "recommended")
+            change = f"<strong>{escape(v['change'])}</strong>" if strong else escape(v["change"])
+            cells.append(f"{change}<span class='cell-note'>前回 {escape(v['prev'])} → 今回 {escape(v['cur'])}</span>")
+        cells.append(f"{escape(ch['previous_observed'])} → {escape(ch['current_observed'])}")
+        rows.append(cells)
+    return ("<h3>前回の観測との比較</h3>"
+            + _table_html(["キーワード", "AIO生成", "TCDの引用", "TCDの会社推薦", "観測日時（前回→今回）"], rows, num_from=99, extra_class="content-table")
+            + (_notes_html(aio["change_notes"]) if aio.get("change_notes") else ""))
 
 
 def _aio_content_html(c: dict) -> str:
@@ -906,7 +915,7 @@ def _aio_content_html(c: dict) -> str:
                      escape(r["competitor_recommendation_label"]),
                      escape(r["citation_count_label"]),
                      (f"{escape(top['name'])}<span class='cell-note'>{_p1(top['position'])}位・表示{top['impressions']}</span>" if top else "—")])
-    html = [f'<p class="lede-line">{_highlight_aio_cited(aio["summary"])}。</p>',
+    html = [f'<p class="lede-line">{_highlight_aio_cited(aio["summary"])}。</p>', _aio_changes_html(aio), "<h3>今回の観測</h3>",
             _table_html(["キーワード", "AIO", "TCDの引用", "TCDの推薦", "競合の推薦", "引用ドメイン", "TCDで最も表示されたページ"],
                         rows, num_from=99, extra_class="content-table")]
     cards = []
@@ -957,31 +966,32 @@ def _seo_content_html(c: dict, seo_notes: list[str]) -> str:
         html.append('<div class="card-grid">' + "".join(checks) + "</div>")
     lrows = [[_status_chip(p["status"], p["state"]), _page_name_html(p), f"{_p1(p['prev_position'])}→{_p1(p['position'])}",
               f"{p['prev_impressions']:,}→{p['impressions']:,}", f"{p['prev_clicks']}→{p['clicks']}",
-              f"{_pct1(p['prev_ctr'])}→{_pct1(p['ctr'])}", escape("、".join(p["top_queries"]) or "—")] for p in c["regional_lps"]]
+              f"{_pct1(p['prev_ctr'])}→{_pct1(p['ctr'])}", escape("、".join(p["top_queries"]) or "—"),
+              _eval_cell_html(p)] for p in c["regional_lps"]]
     if lrows:
         html += ["<h3>地域LPの検索実績（全クエリの合計）</h3>",
-                 _table_html(["区分", "ページ", "順位（前週→今週）", "表示", "クリック", "CTR", "主要クエリ（上位3）"], lrows, num_from=99, extra_class="content-table"),
+                 _table_html(["区分", "ページ", "順位（前週→今週）", "表示", "クリック", "CTR", "主要クエリ（上位3）", "評価・確認すべき論点・次の対応"], lrows, num_from=99, extra_class="content-table"),
                  _notes_html(["上の表の「重点キーワード」の値は、そのキーワードに一致するクエリだけの集計。この表は地域LPに表示された全クエリの合計で、両者は一致しない。"])]
-    prows = []
-    for p in c["pages"]:
-        if p["status"] == "評価材料不足":
-            continue
-        ev = escape(p["evaluation"])
-        if p["points"]:
-            ev += "<span class='cell-note'>論点: " + escape("／".join(p["points"])) + "</span>"
-        ev += f"<span class='cell-note'>次: {escape(p['next_action'])}</span>"
-        prows.append([_status_chip(p["status"], p["state"]), _page_name_html(p), escape(p["intent_label"]),
-                      escape(p["top_query"] or "—"), f"{_p1(p['prev_position'])}→{_p1(p['position'])}",
-                      f"{p['impressions']:,}", str(p["clicks"]), _pct1(p["ctr"]), ev])
-    thin = [p for p in c["pages"] if p["status"] == "評価材料不足"]
-    html += ["<h3>ページ別の評価</h3>",
-             '<p class="note">監視対象ページのうち、表示回数が今週・前週とも50以上のページ。</p>',
-             _table_html(["区分", "ページ", "検索意図", "主要クエリ", "順位（前週→今週）", "表示", "クリック", "CTR", "評価・確認すべき論点・次の対応"],
-                         prows, num_from=99, extra_class="content-table"),
-             _notes_html([f"評価材料不足（表示50回未満の週がある）{len(thin)}件は、変化を評価せずAppendixの「ページ別評価（全件）」に掲載。"
-                          "サービス・地域・比較ページは改善候補として①にも挙げる。",
-                          c["status_rules"], "順位・表示・CTR・クリックは判断材料で、増減だけで良否を決めない。", *seo_notes])]
+    lead = c["lead"]
+    html.append("<h3>改善候補（確認が必要なコンテンツ）</h3>")
+    html.append('<div class="card-grid">' + "".join(_eval_card_html(p, True) for p in lead["candidates"]) + "</div>"
+                if lead["candidates"] else '<p class="empty">該当なし</p>')
+    notes = []
+    if lead["thin_candidates"]:
+        names = "、".join(f"「{p['short_title']}」" for p in lead["thin_candidates"])
+        notes.append(f"評価材料不足（表示が週50回未満）のサービス・地域・比較ページ{len(lead['thin_candidates'])}件も改善候補に含める: "
+                     f"{names}。順位・クリックの変化は評価していない。")
+    notes += ["地域LPは上の「地域LPの検索実績」に記載。全ページの評価（順位上昇・順位安定を含む）と区分の基準はAppendixの「ページ別評価（全件）」。",
+              *seo_notes]
+    html.append(_notes_html(notes))
     return "".join(html)
+
+
+def _eval_cell_html(p: dict) -> str:
+    ev = escape(p["evaluation"])
+    if p["points"]:
+        ev += "<span class='cell-note'>論点: " + escape("／".join(p["points"])) + "</span>"
+    return ev + f"<span class='cell-note'>次: {escape(p['next_action'])}</span>"
 
 
 def _metric_table_html(lines: list[dict]) -> str:
@@ -1040,9 +1050,11 @@ def _inquiry_dashboard_html(c: dict) -> str:
 def _appendix_pages_all_html(c: dict) -> str:
     rows = [[_status_chip(p["status"], p["state"]), _page_name_html(p), escape(p["intent_label"]),
              escape("、".join(p["top_queries"]) or "—"), f"{_p1(p['prev_position'])}→{_p1(p['position'])}",
-             f"{p['prev_impressions']:,}→{p['impressions']:,}", f"{p['prev_clicks']}→{p['clicks']}", escape(p["evaluation"])]
+             f"{p['prev_impressions']:,}→{p['impressions']:,}", f"{p['prev_clicks']}→{p['clicks']}", _pct1(p["ctr"]), _eval_cell_html(p)]
             for p in c["pages"]]
-    return _table_html(["区分", "ページ", "検索意図", "主要クエリ（上位3）", "順位", "表示", "クリック", "評価"], rows, num_from=99, extra_class="content-table")
+    return (_table_html(["区分", "ページ", "検索意図", "主要クエリ（上位3）", "順位（前週→今週）", "表示（前週→今週）", "クリック", "CTR",
+                         "評価・確認すべき論点・次の対応"], rows, num_from=99, extra_class="content-table")
+            + _notes_html([c["status_rules"], "順位・表示・CTR・クリックは判断材料で、増減だけで良否を決めない。"]))
 
 
 _CONTENT_STYLE = """
@@ -1063,6 +1075,10 @@ _CONTENT_STYLE = """
   table.mini-table th, table.mini-table td { text-align: left; padding: .25rem .4rem; border-top: 1px solid var(--gridline); vertical-align: top; }
   table.mini-table th { color: var(--text-muted); font-weight: 600; white-space: nowrap; }
   .eval-card .v ul.fact-list { margin: 0; }
+  ul.lead-eval { list-style: none; padding-left: 0; }
+  ul.lead-eval li { margin: .3rem 0; }
+  ul.lead-eval .tag { margin-right: .5rem; }
+  ol.lead-actions li { margin: .3rem 0; }
   .kpi-line { font-size: .8rem; color: var(--text-secondary); border-top: 1px solid var(--gridline); padding-top: .6rem; margin-top: .8rem; }
 """
 
@@ -1119,7 +1135,7 @@ def render_html_content(vm: dict) -> str:
   <summary>Appendix　※クリックして表示</summary>
   <h3>キーワード別詳細（クエリ内訳・AIO引用元・判定）</h3>
   {_keyword_details_html(vm["priority_markets"])}
-  <h3>ページ別評価（全件・データ不足を含む）</h3>
+  <h3>ページ別評価（全件・評価材料不足を含む）</h3>
   {_appendix_pages_all_html(c)}
   <h3>{escape(initiatives_title)}</h3>
   {initiatives_html}

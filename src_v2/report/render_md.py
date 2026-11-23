@@ -462,39 +462,30 @@ def _page_cell(p: dict) -> str:
 
 def _lead_md(c: dict) -> str:
     lead = c["lead"]
-    out = ["**最重要の変化**\n"] + [f"- {h}" for h in lead["headline"]] + [""]
-    out.append("**前週比で順位が上昇したコンテンツ**\n")
-    if lead["progressed"]:
-        out += ["| コンテンツ | 事実（前週→今週） | 評価 | 次の対応 |", "|---|---|---|---|"]
-        for p in lead["progressed"]:
-            ev = p["evaluation"] + ("。" + p["notes"][0] if p["notes"] else "")
-            out.append(f"| {_cell(_page_cell(p))} | {p['facts']} | {_cell(ev)} | {_cell(p['next_action'])} |")
-    else:
-        out.append("該当なし")
-    out.append("\n**確認が必要なコンテンツ（改善候補）**\n")
-    if lead["candidates"]:
-        out += ["| 区分 | コンテンツ | 事実（前週→今週） | 評価 | 確認すべき論点（未確認） | 次の対応 |", "|---|---|---|---|---|---|"]
-        for p in lead["candidates"]:
-            ev = p["evaluation"] + ("。" + p["notes"][0] if p["notes"] else "")
-            out.append(f"| {p['status']} | {_cell(_page_cell(p))} | {p['facts']} | {_cell(ev)} | {_cell('／'.join(p['points']))} "
-                       f"| {_cell(p['next_action'])} |")
-    else:
-        out.append("該当なし")
-    out.append("")
-    if lead["thin_candidates"]:
-        names = "、".join(f"「{p['short_title']}」" for p in lead["thin_candidates"])
-        out.append(f"- 評価材料不足（表示が週50回未満）のサービス・地域・比較ページ{len(lead['thin_candidates'])}件も改善候補に含める: "
-                   f"{names}。順位・クリックの変化は評価していない（③・Appendix）。")
-    out.append("- 順位の上昇・低下は前週比（1週分）の順位変動で、施策の効果判定ではない（施策は④で実装前後を比較対照と比べる）。"
-               "「確認すべき論点」は未確認の問いで、原因を判断したものではない。")
-    if lead["kpi_line"]:
-        out.append(f"- 結果指標（参考）: {lead['kpi_line']}（詳細は⑤・⑥）")
+    out = ["**最重要の変化**\n"] + ([f"- {h}" for h in lead["changes"]] or ["- 該当なし"]) + [""]
+    out += ["**今週の評価**\n"] + [f"- [{e['kind']}] {e['text']}" for e in lead["evaluation"]] + [""]
+    out += ["**次の対応**\n"] + ([f"{n}. {a}" for n, a in enumerate(lead["actions"], 1)] or ["- 該当なし"]) + [""]
+    out.append("- 順位の変化は前週比（1週分）で、施策の効果判定ではない。AIOの変化は各回1回ずつの観測の比較。"
+               "改善候補は③、全ページの評価と区分の基準はAppendix、AIOの前回比較は②。")
+    return "\n".join(out) + "\n"
+
+
+def _aio_changes_md(aio: dict) -> str:
+    out = ["**前回の観測との比較**\n", "| キーワード | AIO生成 | TCDの引用 | TCDの会社推薦 | 観測日時（前回→今回） |", "|---|---|---|---|---|"]
+    for ch in aio["changes"]:
+        cells = []
+        for item in ("generated", "cited", "recommended"):
+            v = ch["items"][item]
+            change = f"**{v['change']}**" if v["direction"] == "lost" and item in ("cited", "recommended") else v["change"]
+            cells.append(f"{change}（前回 {v['prev']} → 今回 {v['cur']}）")
+        out.append(f"| {ch['market_label']} | {' | '.join(cells)} | {ch['previous_observed']} → {ch['current_observed']} |")
+    out += [""] + [f"- {n}" for n in aio.get("change_notes") or []]
     return "\n".join(out) + "\n"
 
 
 def _aio_md(c: dict) -> str:
     aio = c["aio"]
-    out = [f"{aio['summary']}。\n",
+    out = [f"{aio['summary']}。\n", _aio_changes_md(aio), "**今回の観測**\n",
            "| キーワード | AIO | TCDの引用 | TCDの推薦 | 競合の推薦 | 引用ドメイン（今回の件数／前回からの増減） | TCDで最も表示されたページ |",
            "|---|---|---|---|---|---|---|"]
     for r in aio["rows"]:
@@ -547,29 +538,33 @@ def _seo_content_md(c: dict, seo_notes: list[str]) -> str:
     out += checks
     if c["regional_lps"]:
         out += ["\n**地域LPの検索実績（全クエリの合計）**\n",
-                "| 区分 | ページ | 順位（前週→今週） | 表示 | クリック | CTR | 主要クエリ（上位3） |", "|---|---|---|---|---|---|---|"]
+                "| 区分 | ページ | 順位（前週→今週） | 表示 | クリック | CTR | 主要クエリ（上位3） | 評価・確認すべき論点・次の対応 |", "|---|---|---|---|---|---|---|---|"]
         for p in c["regional_lps"]:
             out.append(f"| {p['status']} | {_cell(_page_cell(p))} | {_pos1(p['prev_position'])}→{_pos1(p['position'])} "
                        f"| {p['prev_impressions']:,}→{p['impressions']:,} | {p['prev_clicks']}→{p['clicks']} "
-                       f"| {_ctr1(p['prev_ctr'])}→{_ctr1(p['ctr'])} | {_cell('、'.join(p['top_queries']))} |")
+                       f"| {_ctr1(p['prev_ctr'])}→{_ctr1(p['ctr'])} | {_cell('、'.join(p['top_queries']))} | {_cell(_eval_text(p))} |")
         out.append("\n- 重点キーワードの値はそのキーワードに一致するクエリだけの集計。この表は地域LPに表示された全クエリの合計で、両者は一致しない。")
-    out.append("\n**ページ別の評価**（監視対象ページのうち、表示回数が今週・前週とも50以上のページ）\n")
-    out += ["| 区分 | ページ | 検索意図 | 主要クエリ | 順位（前週→今週） | 表示 | クリック | CTR | 評価・確認すべき論点・次の対応 |",
-            "|---|---|---|---|---|---:|---:|---:|---|"]
-    thin = [p for p in c["pages"] if p["status"] == "評価材料不足"]
-    for p in c["pages"]:
-        if p["status"] == "評価材料不足":
-            continue
-        ev = p["evaluation"] + (f"／論点: {'・'.join(p['points'])}" if p["points"] else "") + f"／次: {p['next_action']}"
-        out.append(f"| {p['status']} | {_cell(_page_cell(p))} | {p['intent_label']} | {_cell(p['top_query'])} "
-                   f"| {_pos1(p['prev_position'])}→{_pos1(p['position'])} | {p['impressions']:,} | {p['clicks']} | {_ctr1(p['ctr'])} | {_cell(ev)} |")
-    out.append("")
-    out.append(f"- 評価材料不足（表示50回未満の週がある）{len(thin)}件は、変化を評価せずAppendixの「ページ別評価（全件）」に掲載。"
-               "サービス・地域・比較ページは改善候補として①にも挙げる。")
-    out.append(f"- {c['status_rules']}")
-    out.append("- 順位・表示・CTR・クリックは判断材料で、増減だけで良否を決めない。")
+    lead = c["lead"]
+    out.append("\n**改善候補（確認が必要なコンテンツ）**\n")
+    if lead["candidates"]:
+        out += ["| 区分 | コンテンツ | 事実（前週→今週） | 評価 | 確認すべき論点（未確認） | 次の対応 |", "|---|---|---|---|---|---|"]
+        for p in lead["candidates"]:
+            ev = p["evaluation"] + ("。" + p["notes"][0] if p["notes"] else "")
+            out.append(f"| {p['status']} | {_cell(_page_cell(p))} | {p['facts']} | {_cell(ev)} | {_cell('／'.join(p['points']))} "
+                       f"| {_cell(p['next_action'])} |")
+    else:
+        out.append("該当なし")
+    if lead["thin_candidates"]:
+        names = "、".join(f"「{p['short_title']}」" for p in lead["thin_candidates"])
+        out.append(f"\n- 評価材料不足（表示が週50回未満）のサービス・地域・比較ページ{len(lead['thin_candidates'])}件も改善候補に含める: "
+                   f"{names}。順位・クリックの変化は評価していない。")
+    out.append("\n- 地域LPは上の「地域LPの検索実績」に記載。全ページの評価（順位上昇・順位安定を含む）と区分の基準はAppendixの「ページ別評価（全件）」。")
     out += [f"- {n}" for n in seo_notes]
     return "\n".join(out) + "\n"
+
+
+def _eval_text(p: dict) -> str:
+    return p["evaluation"] + (f"／論点: {'・'.join(p['points'])}" if p["points"] else "") + f"／次: {p['next_action']}"
 
 
 def _initiatives_content_md(c: dict) -> str:
@@ -614,12 +609,13 @@ def _inquiry_dashboard_md(c: dict) -> str:
 
 
 def _appendix_pages_all_md(c: dict) -> str:
-    out = ["| 区分 | ページ | 検索意図 | 主要クエリ（上位3） | 順位（前週→今週） | 表示（前週→今週） | クリック | 評価 |",
-           "|---|---|---|---|---|---|---:|---|"]
+    out = ["| 区分 | ページ | 検索意図 | 主要クエリ（上位3） | 順位（前週→今週） | 表示（前週→今週） | クリック | CTR | 評価・確認すべき論点・次の対応 |",
+           "|---|---|---|---|---|---|---:|---:|---|"]
     for p in c["pages"]:
         out.append(f"| {p['status']} | {_cell(_page_cell(p))} | {p['intent_label']} | {_cell('、'.join(p['top_queries']))} "
                    f"| {_pos1(p['prev_position'])}→{_pos1(p['position'])} | {p['prev_impressions']:,}→{p['impressions']:,} "
-                   f"| {p['prev_clicks']}→{p['clicks']} | {_cell(p['evaluation'])} |")
+                   f"| {p['prev_clicks']}→{p['clicks']} | {_ctr1(p['ctr'])} | {_cell(_eval_text(p))} |")
+    out += ["", f"- {c['status_rules']}", "- 順位・表示・CTR・クリックは判断材料で、増減だけで良否を決めない。"]
     return "\n".join(out) + "\n"
 
 
@@ -652,7 +648,7 @@ def render_markdown_content(vm: dict) -> str:
     parts.append("## Appendix　※クリックして表示\n")
     parts.append("### キーワード別詳細（クエリ内訳・AIO引用元・判定）\n")
     parts.append(_keyword_details_section(vm["priority_markets"]))
-    parts.append("### ページ別評価（全件・データ不足を含む）\n")
+    parts.append("### ページ別評価（全件・評価材料不足を含む）\n")
     parts.append(_appendix_pages_all_md(c))
     parts.append(_initiatives_section(appendix))
     parts.append("\n### データ品質\n")

@@ -45,7 +45,7 @@ def test_position_change_is_labeled_week_over_week():
 def test_insufficient_service_page_stays_candidate():
     p = _eval(_m(10, 0, 30), _m(12, 0, 25), objective="conversion")
     assert p["status"] == ce.STATUS_INSUFFICIENT and "改善候補" in p["next_action"] and p["points"]
-    lead = ce.build_lead([], [p], {"summary": "x"}, {"counts": {"評価可能": 0, "要調査": 0, "評価保留": 0}, "item_count": 0},
+    lead = ce.build_lead([], [p], {"summary": "x"}, {"counts": {"評価可能": 0, "要調査": 0, "評価保留": 0}, "item_count": 0, "rows": []},
                          {"tiles": []}, {})
     assert lead["thin_candidates"] == [p]
 
@@ -105,7 +105,7 @@ def test_citation_count_separates_total_and_change():
     ch = ce._citation_change(summary, [], ["a.jp", "b.jp", "c.jp", "d.jp", "e.jp"])
     assert ce.citation_count_label(ch) == "現在5件（うち前回なし2件）／前回から消失1件（前回4件）"
     assert ce.citation_count_label(ce._citation_change({"comparison_available": False}, [], ["a.jp"])) == \
-        "現在1件（前回の観測と比較できず）"
+        "現在1件（前回比較不可）"
     seen = [{"evidence": {"direction": "new", "domain": "b.jp", "periods_cited": ["2026-10-30", "2026-11-20"]}}]
     assert ce._citation_change(summary, seen, ["b.jp"])["new_seen_before"] == ["b.jp"]
 
@@ -119,3 +119,85 @@ def test_comparison_window_notes_excluded_initial_period():
     ev2 = {"implemented_at": "2026-11-01", "windows": {"days": 14, "pre": {"start": "2026-10-18", "end": "2026-10-31"},
                                                       "post": {"start": "2026-11-02", "end": "2026-11-15"}}}
     assert ce.comparison_window(ev2)["excluded"] is None
+
+
+def _snap(gen=True, cited=False, rec="not_recommended", status="success", ts="2026-11-16T00:11:23Z"):
+    return {"observed_at": ts, "acquisition_status": status, "aio_generated": gen, "citation_status": "extracted",
+            "tcd_cited": cited, "recommendation_status": rec, "cited_source_count": 5, "resolvable_domain_count": 5}
+
+
+def _kw(query, tier="deal"):
+    return {"query": query, "tier": tier, "market_label": query, "short_label": query}
+
+
+def _mf(query, prev, cur):
+    return {"evidence": {"query": query, "aio_previous": prev, "aio_current": cur}}
+
+
+def test_aio_changes_detect_loss_and_put_it_first():
+    kws = [_kw("東京"), _kw("ブランディング", tier="theme")]
+    mfs = [_mf("東京", _snap(cited=True, rec="recommended"), _snap(ts="2026-11-23T01:46:48Z")),
+           _mf("ブランディング", _snap(rec="not_applicable"), _snap(cited=True, rec="not_applicable"))]
+    changes = ce.build_aio_changes(mfs, kws)
+    tokyo = changes[0]["items"]
+    assert tokyo["recommended"]["change"] == "あり→なし" and tokyo["cited"]["change"] == "あり→なし"
+    assert tokyo["generated"]["change"] == "変化なし"
+    assert changes[0]["previous_observed"] == "11/16 09:11" and changes[0]["current_observed"] == "11/23 10:46"
+    assert changes[1]["items"]["recommended"]["change"] == "対象外"
+    assert changes[1]["items"]["cited"]["change"] == "なし→あり"
+    lines = ce.aio_event_lines(ce.aio_change_events(changes))
+    assert lines[0]["lost"] and "TCDの会社推薦があり→なし、TCDの引用があり→なし" in lines[0]["text"]
+    assert not lines[1]["lost"]
+
+
+def test_aio_changes_without_previous_are_not_guessed():
+    changes = ce.build_aio_changes([_mf("東京", None, _snap())], [_kw("東京")])
+    assert all(v["change"].startswith("前回比較不可") and v["direction"] is None for v in changes[0]["items"].values())
+    undeterminable = ce.build_aio_changes([_mf("大阪", _snap(rec="undeterminable"), _snap(rec="not_recommended"))], [_kw("大阪")])
+    assert undeterminable[0]["items"]["recommended"]["change"] == "前回比較不可"
+
+
+def test_aio_generation_change_is_separate_from_citation():
+    changes = ce.build_aio_changes([_mf("東京", _snap(gen=True, cited=True, rec="recommended"), _snap(gen=False))], [_kw("東京")])
+    items = changes[0]["items"]
+    assert items["generated"]["change"] == "あり→なし"
+    assert items["cited"]["cur"] == "なし（AIO未生成）"
+
+
+def test_lead_always_keeps_aio_losses_and_caps_lengths():
+    lost = [{"text": f"loss{i}", "query": f"k{i}", "lost": True, "priority": 0, "events": [{"market_label": f"k{i}", "label": "TCDの引用", "direction": "lost"}]}
+            for i in range(4)]
+    lead = ce.build_lead([], [], {"summary": "", "change_lines": lost},
+                         {"counts": {"評価可能": 0, "要調査": 0, "評価保留": 0}, "item_count": 0, "rows": []}, {"tiles": []}, {})
+    assert lead["changes"] == ["loss0", "loss1", "loss2", "loss3"]  # 消失は上限を超えても落とさない
+    assert len(lead["actions"]) <= ce.LEAD_MAX_ACTIONS
+
+
+def test_citation_count_not_compared_when_previous_domains_unresolved():
+    ch = ce._citation_change({"comparison_available": True, "previous_count": 0, "new_domains": ["a.jp"], "dropped_domains": []},
+                             [], ["a.jp"], {"cited_source_count": 20, "resolvable_domain_count": 0})
+    assert ce.citation_count_label(ch) == "現在1件（前回比較不可: 前回の引用元はドメインを特定できず）"
+
+
+def test_aio_daily_note_summarizes_daily_and_missing_days():
+    daily = {"by_query": {"東京": [
+        {"date": f"2026-11-{d:02d}", "status": "OK_WITH_AIO", "tcd_cited": True, "recommendation_status": "recommended"}
+        for d in (9, 10, 11, 12, 13, 16, 17, 18, 19, 20)]}}
+    note = ce.aio_daily_note(daily, "東京", "2026-11-23T01:46:48Z")
+    assert note == "日次のAIO監視では、11/9〜11/20の10回の観測すべてで推薦あり・引用あり。11/21〜11/23の日次データはない"
+    daily["by_query"]["東京"][0]["tcd_cited"] = False
+    assert "推薦あり10回・引用あり9回" in ce.aio_daily_note(daily, "東京", "2026-11-23T01:46:48Z")
+    assert ce.aio_daily_note({"by_query": {}}, "東京", None) is None
+
+
+def test_aio_daily_context_reads_only_window_and_queries(tmp_path):
+    import json
+    from src_v2.analysis import summary
+    for day in ("2026-11-01", "2026-11-20", "2026-11-24"):
+        (tmp_path / f"{day}.json").write_text(json.dumps([
+            {"query": "東京", "status": "OK_WITH_AIO", "aio_exists": True, "tcd_cited": True, "recommendation_status": "recommended"},
+            {"query": "他", "status": "OK_WITH_AIO"}]), encoding="utf-8")
+    bundle = {"aio_observations": [{"query": "東京", "observed_at": "2026-11-23T01:46:48Z"}]}
+    ctx = summary._aio_daily_context(bundle, tmp_path)
+    assert ctx["window"] == {"start": "2026-11-09", "end": "2026-11-23"}
+    assert [r["date"] for r in ctx["by_query"]["東京"]] == ["2026-11-20"] and "他" not in ctx["by_query"]
